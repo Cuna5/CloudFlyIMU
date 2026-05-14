@@ -57,6 +57,26 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define BMI_SCK_Pin GPIO_PIN_5
+#define BMI_SCK_GPIO_Port GPIOA
+#define BMI_MISO_Pin GPIO_PIN_6
+#define BMI_MISO_GPIO_Port GPIOA
+#define BMI_MOSI_Pin GPIO_PIN_7
+#define BMI_MOSI_GPIO_Port GPIOA
+#define BMI_ACC_CS_Pin GPIO_PIN_4
+#define BMI_ACC_CS_GPIO_Port GPIOC
+#define BMI_GYRO_CS_Pin GPIO_PIN_5
+#define BMI_GYRO_CS_GPIO_Port GPIOC
+#define DEBUG_TX_Pin GPIO_PIN_14
+#define DEBUG_TX_GPIO_Port GPIOB
+#define DEBUG_RX_Pin GPIO_PIN_15
+#define DEBUG_RX_GPIO_Port GPIOB
+#define HEAT_PWM_Pin GPIO_PIN_6
+#define HEAT_PWM_GPIO_Port GPIOC
+#define IST_SCL_Pin GPIO_PIN_6
+#define IST_SCL_GPIO_Port GPIOB
+#define IST_SDA_Pin GPIO_PIN_7
+#define IST_SDA_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
