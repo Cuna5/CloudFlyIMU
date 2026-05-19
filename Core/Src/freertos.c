@@ -21,12 +21,11 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "main.h"
-#include "FreeRTOS.h"
 #include "cmsis_os2.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "hardware.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,7 +35,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define SENSOR_TASK_PERIOD_MS          1U
+#define SENSOR_PRESSURE_DIV            100U
+#define HEAT_TASK_PERIOD_MS            100U
+#define DEBUG_TASK_PERIOD_MS           1000U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -96,7 +98,7 @@ const osMutexAttr_t SPIMutex_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
-
+static int32_t App_FloatToMilli(float value);
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void *argument);
@@ -196,10 +198,49 @@ void StartDefaultTask(void *argument)
 void StartTask02(void *argument)
 {
   /* USER CODE BEGIN StartTask02 */
+  (void)argument;
+
+  SensorData_t sample = {0};
+  uint32_t pressure_div = 0U;
+  uint32_t last_warn_ms = 0U;
+  bool first_warn = true;
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    Driver_Status st = Sensor_SampleOnce(&sample);
+
+    pressure_div++;
+    if (pressure_div >= SENSOR_PRESSURE_DIV)
+    {
+      pressure_div = 0U;
+      float pressure_pa = sample.pressure;
+      Driver_Status p_st = BMP280_ReadPressure(&pressure_pa);
+      if (p_st == DRV_OK)
+      {
+        sample.pressure = pressure_pa;
+      }
+      else if (st == DRV_OK)
+      {
+        st = p_st;
+      }
+    }
+
+    (void)Heater_GetDuty(&sample.pwm_duty);
+    (void)SensorData_Set(&sample);
+
+    if (st != DRV_OK)
+    {
+      uint32_t now_ms = HAL_GetTick();
+      if (first_warn || ((now_ms - last_warn_ms) >= 1000U))
+      {
+        first_warn = false;
+        last_warn_ms = now_ms;
+        Debug_Log_Level(DBG_WARN, "Sensor sample err=%d", (int)st);
+      }
+    }
+
+    osDelay(SENSOR_TASK_PERIOD_MS);
   }
   /* USER CODE END StartTask02 */
 }
@@ -214,10 +255,43 @@ void StartTask02(void *argument)
 void StartTask03(void *argument)
 {
   /* USER CODE BEGIN StartTask03 */
+  (void)argument;
+
+  uint32_t last_bmp_errors = 0U;
+  bool overheat_logged = false;
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    SensorData_t snap;
+    if (SensorData_Get(&snap) == DRV_OK)
+    {
+      Driver_Status heat_st = Heater_OverheatCheck(snap.temperature);
+      if (heat_st == DRV_ERR_PARAM)
+      {
+        if (!overheat_logged)
+        {
+          overheat_logged = true;
+          Debug_Log_Level(DBG_ERR, "Heater overheat temp_mC=%ld",
+                          (long)App_FloatToMilli(snap.temperature));
+        }
+      }
+      else if (heat_st == DRV_OK)
+      {
+        overheat_logged = false;
+      }
+    }
+
+    uint32_t bmp_errors = 0U;
+    Sensor_GetErrorCounters(NULL, NULL, &bmp_errors);
+    if (bmp_errors != last_bmp_errors)
+    {
+      last_bmp_errors = bmp_errors;
+      (void)Heater_EmergencyStop();
+      Debug_Log_Level(DBG_ERR, "BMP280 read fault, heater stopped");
+    }
+
+    osDelay(HEAT_TASK_PERIOD_MS);
   }
   /* USER CODE END StartTask03 */
 }
@@ -232,6 +306,8 @@ void StartTask03(void *argument)
 void StartTask04(void *argument)
 {
   /* USER CODE BEGIN StartTask04 */
+  (void)argument;
+
   /* Infinite loop */
   for(;;)
   {
@@ -250,16 +326,65 @@ void StartTask04(void *argument)
 void StartTask05(void *argument)
 {
   /* USER CODE BEGIN StartTask05 */
+  (void)argument;
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    SensorData_t snap;
+    uint32_t bmi_errors = 0U;
+    uint32_t ist_errors = 0U;
+    uint32_t bmp_errors = 0U;
+
+    if (SensorData_Get(&snap) == DRV_OK)
+    {
+      Sensor_GetErrorCounters(&bmi_errors, &ist_errors, &bmp_errors);
+
+      Debug_Log_Level(DBG_INFO,
+                      "A_milli=%ld,%ld,%ld G_milli=%ld,%ld,%ld",
+                      (long)App_FloatToMilli(snap.ax),
+                      (long)App_FloatToMilli(snap.ay),
+                      (long)App_FloatToMilli(snap.az),
+                      (long)App_FloatToMilli(snap.gx),
+                      (long)App_FloatToMilli(snap.gy),
+                      (long)App_FloatToMilli(snap.gz));
+
+      Debug_Log_Level(DBG_INFO,
+                      "M_milli=%ld,%ld,%ld T_mC=%ld P_Pa=%ld PWM_permille=%ld ERR=%lu,%lu,%lu",
+                      (long)App_FloatToMilli(snap.mx),
+                      (long)App_FloatToMilli(snap.my),
+                      (long)App_FloatToMilli(snap.mz),
+                      (long)App_FloatToMilli(snap.temperature),
+                      (long)(App_FloatToMilli(snap.pressure) / 1000),
+                      (long)App_FloatToMilli(snap.pwm_duty),
+                      (unsigned long)bmi_errors,
+                      (unsigned long)ist_errors,
+                      (unsigned long)bmp_errors);
+    }
+
+    osDelay(DEBUG_TASK_PERIOD_MS);
   }
   /* USER CODE END StartTask05 */
 }
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+static int32_t App_FloatToMilli(float value)
+{
+  if (value != value)
+  {
+    return 0;
+  }
+  if (value > 2147483.0f)
+  {
+    return INT32_MAX;
+  }
+  if (value < -2147483.0f)
+  {
+    return INT32_MIN;
+  }
+  return (int32_t)(value * 1000.0f);
+}
 
 /* USER CODE END Application */
 

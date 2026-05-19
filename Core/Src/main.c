@@ -29,7 +29,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "hardware.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -103,7 +103,14 @@ int main(void)
   MX_TIM3_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  {
+    Driver_Status hw_st = Hardware_Init();
+    if (hw_st != DRV_OK) {
+      /* Hardware_Init already logged the failing module via Debug_Log_Level.
+       * Spin here so a debugger can inspect hw_st before the RTOS starts. */
+      Error_Handler();
+    }
+  }
   /* USER CODE END 2 */
 
   /* Init scheduler */
