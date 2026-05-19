@@ -1,29 +1,18 @@
 /**
  * @file    ist8310.c
- * @brief   IST8310 magnetometer driver (I2C1, 7-bit address 0x0E).
+ * @brief   IST8310 磁力计驱动（I2C1，7-bit 地址 0x0E）实现。
  *
- * Spec: .kiro/specs/hardware-base-drivers/{requirements,design,tasks}.md
- *       (task 4.1, Requirements 3.1..3.8, 8.6)
+ * I2C 帧格式：
+ *   - 从机 7-bit 地址      = 0x0E
+ *   - HAL_I2C_Mem_* devAddress = 0x0E << 1 = 0x1C
+ *   - 内存地址大小          = 1 字节（I2C_MEMADD_SIZE_8BIT）
  *
- * I2C frame layout used here:
- *   - Slave 7-bit address      = 0x0E.
- *   - HAL_I2C_Mem_* devAddress = 0x0E << 1 = 0x1C.
- *   - Memory address size      = 1 byte (`I2C_MEMADD_SIZE_8BIT`).
- *
- * All I2C transfers are wrapped in `osMutexAcquire(I2CMutexHandle, ...)`
- * when the FreeRTOS scheduler is running (the same lock used by
- * `bmp280.c`, since both devices share I2C1). When the scheduler is not
- * yet running (e.g. `Hardware_Init` called from `main` before
- * `osKernelStart`), the mutex is bypassed and HAL APIs are called
- * directly.
- *
- * HAL return codes are mapped through `Driver_MapHalStatus` so that the
- * caller observes the unified `Driver_Status` enum.
+ * 所有 I2C 传输在调度器运行时通过 I2CMutexHandle 加锁（与 bmp280.c 共享 I2C1）；
+ * 调度器未启动时跳过加锁，直接调用 HAL API。
+ * HAL 返回码通过 Driver_MapHalStatus 映射为统一的 Driver_Status。
  */
-/* hardware.h first: it owns the Driver_Status enum and HAL_TIMEOUT_MS, and
- * re-exports ist8310.h as part of the aggregate facade. Including the
- * aggregate header keeps this driver's translation unit consistent with the
- * sibling drivers (bmp280.c, bmi088.c) and with what application code sees. */
+/* 先包含 hardware.h：它拥有 Driver_Status 枚举和 HAL_TIMEOUT_MS，
+ * 并通过聚合门面重新导出 ist8310.h。 */
 #include "hardware.h"   /* Driver_Status, HAL_TIMEOUT_MS, Driver_MapHalStatus */
 #include "i2c.h"        /* extern hi2c1 */
 
@@ -32,52 +21,52 @@
 #include <stdint.h>
 
 /* ------------------------------------------------------------------ */
-/* Shared I2C bus mutex (created by CubeMX in Core/Src/freertos.c)     */
+/* 共享 I2C 总线互斥锁（由 CubeMX 在 Core/Src/freertos.c 中创建）     */
 /* ------------------------------------------------------------------ */
 extern osMutexId_t I2CMutexHandle;
 
 /* ------------------------------------------------------------------ */
-/* Device-specific constants                                           */
+/* 设备特定常量                                                        */
 /* ------------------------------------------------------------------ */
 
-/** 7-bit slave address — datasheet §7.1 (CAD0/CAD1 strapped low). */
+/** 7-bit 从机地址（数据手册 §7.1，CAD0/CAD1 接地）。 */
 #define IST8310_I2C_ADDR_7BIT       0x0Eu
 
-/** HAL_I2C_* call expects the address left-shifted by one (R/W flag bit). */
+/** HAL_I2C_* 调用需要左移一位的地址（R/W 标志位）。 */
 #define IST8310_I2C_ADDR_HAL        ((uint16_t)(IST8310_I2C_ADDR_7BIT << 1))   /* 0x1C */
 
-/** Expected Chip ID (WAI) value — datasheet §8.1. */
+/** 期望的 Chip ID（WAI）值——数据手册 §8.1。 */
 #define IST8310_CHIP_ID             0x10u
 
-/* Register map — only the addresses used here are named. */
-#define IST8310_REG_WAI             0x00u   /* Who-Am-I (Chip ID) */
-#define IST8310_REG_DATA_X_L        0x03u   /* First of 6 burst-readable data bytes */
-#define IST8310_REG_CTRL1           0x0Au   /* Control 1 — write 0x01 to start single measurement */
-#define IST8310_REG_CTRL2           0x0Bu   /* Control 2 — DRDY / interrupt enable */
-#define IST8310_REG_AVG_CTRL        0x41u   /* Average control */
-#define IST8310_REG_PD_CTRL         0x42u   /* Pulse duration / performance */
+/* 寄存器映射——仅列出本驱动使用的地址 */
+#define IST8310_REG_WAI             0x00u   /* Who-Am-I（Chip ID） */
+#define IST8310_REG_DATA_X_L        0x03u   /* 6 字节突发读取数据起始地址 */
+#define IST8310_REG_CTRL1           0x0Au   /* 控制寄存器 1——写 0x01 启动单次测量 */
+#define IST8310_REG_CTRL2           0x0Bu   /* 控制寄存器 2——DRDY/中断使能 */
+#define IST8310_REG_AVG_CTRL        0x41u   /* 平均控制 */
+#define IST8310_REG_PD_CTRL         0x42u   /* 脉冲宽度/性能控制 */
 
-/* Control values used during init / read. */
+/* 初始化和读取时使用的控制值 */
 #define IST8310_CTRL2_INIT_VALUE    0xC0u
 #define IST8310_AVG_INIT_VALUE      0x09u
 #define IST8310_PD_INIT_VALUE       0xC0u
 #define IST8310_CTRL1_SINGLE_MEAS   0x01u
 
-/** Single-shot measurement settling time (datasheet §6.1, typical 6 ms). */
+/** 单次测量稳定时间（数据手册 §6.1，典型值 6 ms）。 */
 #define IST8310_MEAS_DELAY_MS       6u
 
-/** Sensitivity: 0.3 µT per LSB (datasheet §6.1). */
+/** 灵敏度：0.3 µT/LSB（数据手册 §6.1）。 */
 #define IST8310_LSB_TO_UT           (0.3f)
 
 /* ------------------------------------------------------------------ */
-/* Module state                                                        */
+/* 模块状态                                                            */
 /* ------------------------------------------------------------------ */
 
-/** Set true at the end of a successful `IST8310_Init`; gates all reads. */
+/** IST8310_Init 成功完成后置 true，用于门控所有读取操作。 */
 static bool s_initialized = false;
 
 /* ------------------------------------------------------------------ */
-/* Internal helpers                                                    */
+/* 内部辅助函数                                                        */
 /* ------------------------------------------------------------------ */
 
 static inline bool ist8310_scheduler_running(void)
@@ -86,10 +75,9 @@ static inline bool ist8310_scheduler_running(void)
 }
 
 /**
- * @brief Acquire the shared I2C bus mutex if the scheduler is running.
+ * @brief 调度器运行时获取共享 I2C 总线互斥锁。
  *
- * Returns @ref DRV_OK if the lock was taken (or skipped because the
- * scheduler is not yet running), @ref DRV_ERR_TIMEOUT otherwise.
+ * @return DRV_OK 已加锁或调度器未运行；DRV_ERR_TIMEOUT 超时。
  */
 static Driver_Status ist8310_bus_lock(void)
 {
@@ -102,7 +90,7 @@ static Driver_Status ist8310_bus_lock(void)
     return DRV_OK;
 }
 
-/** Release the shared I2C bus mutex; no-op if the scheduler is inactive. */
+/** 调度器运行时释放 I2C 总线互斥锁；调度器未运行时为空操作。 */
 static void ist8310_bus_unlock(void)
 {
     if (ist8310_scheduler_running()) {
@@ -110,7 +98,7 @@ static void ist8310_bus_unlock(void)
     }
 }
 
-/** Burst-read `len` bytes starting at register `reg` into `buf`. */
+/** 从寄存器 reg 开始突发读取 len 字节到 buf。 */
 static Driver_Status ist8310_read(uint8_t reg, uint8_t *buf, uint16_t len)
 {
     HAL_StatusTypeDef hs = HAL_I2C_Mem_Read(&hi2c1,
@@ -123,7 +111,7 @@ static Driver_Status ist8310_read(uint8_t reg, uint8_t *buf, uint16_t len)
     return Driver_MapHalStatus(hs);
 }
 
-/** Write a single byte `value` to register `reg`. */
+/** 向寄存器 reg 写入单字节 value。 */
 static Driver_Status ist8310_write_reg(uint8_t reg, uint8_t value)
 {
     uint8_t payload = value;
@@ -137,7 +125,7 @@ static Driver_Status ist8310_write_reg(uint8_t reg, uint8_t value)
     return Driver_MapHalStatus(hs);
 }
 
-/** RTOS-aware ≥ ms delay used between trigger and burst read. */
+/** 调度器感知延时，用于触发和突发读取之间的等待。 */
 static void ist8310_delay_ms(uint32_t ms)
 {
     if (ist8310_scheduler_running()) {
@@ -148,7 +136,7 @@ static void ist8310_delay_ms(uint32_t ms)
 }
 
 /* ------------------------------------------------------------------ */
-/* Public API                                                          */
+/* 公共 API                                                            */
 /* ------------------------------------------------------------------ */
 
 Driver_Status IST8310_Init(void)
@@ -206,17 +194,17 @@ Driver_Status IST8310_ReadMag(float *mx, float *my, float *mz)
         return st;
     }
 
-    /* 1) Trigger a single-shot conversion. */
+    /* 1) 触发单次转换 */
     st = ist8310_write_reg(IST8310_REG_CTRL1, IST8310_CTRL1_SINGLE_MEAS);
     if (st != DRV_OK) {
         ist8310_bus_unlock();
         return st;
     }
 
-    /* 2) Wait at least 6 ms for the conversion to complete. */
+    /* 2) 等待至少 6 ms 转换完成 */
     ist8310_delay_ms(IST8310_MEAS_DELAY_MS);
 
-    /* 3) Burst-read 6 bytes from 0x03..0x08 (X, Y, Z, little-endian). */
+    /* 3) 突发读取 0x03..0x08 共 6 字节（X、Y、Z，小端格式） */
     uint8_t buf[6] = { 0 };
     st = ist8310_read(IST8310_REG_DATA_X_L, buf, sizeof(buf));
     ist8310_bus_unlock();
@@ -224,7 +212,7 @@ Driver_Status IST8310_ReadMag(float *mx, float *my, float *mz)
         return st;
     }
 
-    /* 4) Reconstruct signed 16-bit values, then scale to microtesla. */
+    /* 4) 重建有符号 16-bit 值，然后换算为微特斯拉 */
     int16_t raw_x = (int16_t)((uint16_t)buf[0] | ((uint16_t)buf[1] << 8));
     int16_t raw_y = (int16_t)((uint16_t)buf[2] | ((uint16_t)buf[3] << 8));
     int16_t raw_z = (int16_t)((uint16_t)buf[4] | ((uint16_t)buf[5] << 8));

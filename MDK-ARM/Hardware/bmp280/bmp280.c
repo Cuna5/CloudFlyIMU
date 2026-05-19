@@ -1,24 +1,14 @@
 /**
  * @file    bmp280.c
- * @brief   BMP280 temperature/pressure driver (I2C1).
+ * @brief   BMP280 温度/气压传感器驱动（I2C1）实现。
  *
- * Implements the BMP280 driver per design.md `## Components and Interfaces
- * > bmp280/bmp280` and Requirement 4 (4.1..4.10) plus the cross-cutting
- * `DRV_ERR_NOT_INIT` rule (Requirement 8.6).
- *
- * Bus: I2C1 (`hi2c1`, declared in `i2c.h` on target / `tests/include/i2c.h`
- *       on host). The HAL takes a left-shifted 7-bit address.
- *
- * Mutex: every public API acquires `I2CMutexHandle` via
- *        `osMutexAcquire(I2CMutexHandle, HAL_TIMEOUT_MS)` while the FreeRTOS
- *        scheduler is running; before scheduler start the lock is skipped
- *        (single-threaded boot).
- *
- * Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9, 4.10, 8.6.
+ * 总线：I2C1（hi2c1），HAL 接受左移一位的 7-bit 地址。
+ * 互斥锁：所有公共 API 在调度器运行时通过 I2CMutexHandle 加锁；
+ *         调度器未启动时跳过加锁（单线程启动阶段）。
  */
 
-#include "hardware.h"      /* Driver_Status, HAL_TIMEOUT_MS, sub-headers     */
-#include "i2c.h"           /* hi2c1                                          */
+#include "hardware.h"      /* Driver_Status, HAL_TIMEOUT_MS, 子模块头文件 */
+#include "i2c.h"           /* hi2c1                                       */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -26,25 +16,25 @@
 
 
 /* ================================================================== */
-/* Module-private constants                                            */
+/* 模块私有常量                                                        */
 /* ================================================================== */
 
-/** Default 7-bit I2C address (SDO tied to GND). */
+/** 默认 7-bit I2C 地址（SDO 接 GND）。 */
 #define BMP280_ADDR7_DEFAULT    0x76u
-/** Alternate 7-bit I2C address (SDO tied to VDDIO). */
+/** 备用 7-bit I2C 地址（SDO 接 VDDIO）。 */
 #define BMP280_ADDR7_ALT        0x77u
 
-/** Expected ChipID returned by register 0xD0. */
+/** 寄存器 0xD0 返回的期望 ChipID。 */
 #define BMP280_CHIP_ID          0x58u
 
-/** Register addresses (datasheet table 18). */
-#define BMP280_REG_CALIB_T1_LSB 0x88u   /* start of 24-byte calibration block */
+/** 寄存器地址（数据手册表 18）。 */
+#define BMP280_REG_CALIB_T1_LSB 0x88u   /* 24 字节校准块起始地址 */
 #define BMP280_REG_ID           0xD0u
 #define BMP280_REG_RESET        0xE0u
 #define BMP280_REG_CTRL_MEAS    0xF4u
 #define BMP280_REG_CONFIG       0xF5u
-#define BMP280_REG_PRES_MSB     0xF7u   /* 0xF7..0xF9 holds 20-bit pressure   */
-#define BMP280_REG_TEMP_MSB     0xFAu   /* 0xFA..0xFC holds 20-bit temperature */
+#define BMP280_REG_PRES_MSB     0xF7u   /* 0xF7..0xF9 存放 20-bit 气压原始值 */
+#define BMP280_REG_TEMP_MSB     0xFAu   /* 0xFA..0xFC 存放 20-bit 温度原始值 */
 
 #define BMP280_RESET_KEY        0xB6u
 #define BMP280_CTRL_MEAS_VALUE  0x57u   /* osrs_t=×2, osrs_p=×16, mode=Normal */
@@ -54,7 +44,7 @@
 
 
 /* ================================================================== */
-/* Module-private state                                                */
+/* 模块私有状态                                                        */
 /* ================================================================== */
 
 /**
@@ -86,12 +76,10 @@ static bool           s_t_fine_valid = false;
 
 
 /* ================================================================== */
-/* Mutex / kernel helpers                                              */
+/* 互斥锁 / 内核辅助函数                                              */
 /* ================================================================== */
 
-/* The shared I2C bus mutex is created in `Core/Src/freertos.c`
- * (`MX_FREERTOS_Init`); we simply reference it. On the host test build the
- * mock harness must provide its own definition. */
+/* 共享 I2C 总线互斥锁由 Core/Src/freertos.c 中的 MX_FREERTOS_Init 创建 */
 extern osMutexId_t I2CMutexHandle;
 
 static inline bool bmp280_scheduler_running(void)
@@ -100,10 +88,9 @@ static inline bool bmp280_scheduler_running(void)
 }
 
 /**
- * @brief Acquire the I2C bus mutex if the scheduler is running.
+ * @brief 调度器运行时获取 I2C 总线互斥锁。
  *
- * @retval DRV_OK             Lock taken, or scheduler not yet running.
- * @retval DRV_ERR_TIMEOUT    `osMutexAcquire` returned non-osOK.
+ * @return DRV_OK 已加锁或调度器未运行；DRV_ERR_TIMEOUT 超时。
  */
 static Driver_Status bmp280_lock(void)
 {
@@ -134,12 +121,12 @@ static void bmp280_delay_ms(uint32_t ms)
 
 
 /* ================================================================== */
-/* Low-level I2C wrappers (caller already holds the bus mutex)         */
+/* 底层 I2C 封装（调用方已持有总线互斥锁）                            */
 /* ================================================================== */
 
 static inline uint16_t bmp280_dev_addr(void)
 {
-    /* HAL expects the 7-bit address shifted left by one (R/W bit slot). */
+    /* HAL 需要 7-bit 地址左移一位（R/W 标志位位置） */
     return (uint16_t)((uint16_t)s_addr7 << 1);
 }
 
@@ -162,14 +149,13 @@ static Driver_Status bmp280_write_reg(uint8_t reg, uint8_t value)
 
 
 /* ================================================================== */
-/* Calibration block parsing                                           */
+/* 校准块解析                                                          */
 /* ================================================================== */
 
 /**
- * @brief Parse 24 raw bytes from registers 0x88..0x9F into @ref s_calib.
+ * @brief 将寄存器 0x88..0x9F 的 24 字节原始数据解析到 s_calib。
  *
- * The block is little-endian; signed/unsigned widths follow datasheet
- * table 17.
+ * 数据为小端格式；有符号/无符号宽度遵循数据手册表 17。
  */
 static void bmp280_parse_calibration(const uint8_t *raw)
 {
@@ -189,14 +175,13 @@ static void bmp280_parse_calibration(const uint8_t *raw)
 
 
 /* ================================================================== */
-/* Compensation formulas (BMP280 datasheet section 3.11.3)             */
+/* 补偿公式（BMP280 数据手册 3.11.3 节）                              */
 /* ================================================================== */
 
 /**
- * @brief Assemble a 20-bit unsigned ADC value from a 3-byte register read.
+ * @brief 从 3 字节寄存器读取中组装 20-bit 无符号 ADC 值。
  *
- * Layout:  [MSB] [LSB] [XLSB], where the 20-bit value occupies the upper
- * 4 bits of XLSB. Always treated as unsigned per datasheet.
+ * 布局：[MSB] [LSB] [XLSB]，20-bit 值占 XLSB 的高 4 位。
  */
 static uint32_t bmp280_pack_adc20(const uint8_t raw[3])
 {
@@ -206,9 +191,9 @@ static uint32_t bmp280_pack_adc20(const uint8_t raw[3])
 }
 
 /**
- * @brief Apply the integer temperature-compensation formula and update t_fine.
+ * @brief 应用整数温度补偿公式并更新 t_fine。
  *
- * @return Temperature in 0.01 ℃ (i.e. 5123 ⇒ 51.23 ℃).
+ * @return 温度，单位 0.01 ℃（如 5123 表示 51.23 ℃）。
  */
 static int32_t bmp280_compensate_T_int32(int32_t adc_T)
 {
@@ -223,10 +208,10 @@ static int32_t bmp280_compensate_T_int32(int32_t adc_T)
 }
 
 /**
- * @brief Apply the int64 pressure-compensation formula.
+ * @brief 应用 int64 气压补偿公式。
  *
- * @return Pressure in Q24.8 fixed-point Pa (i.e. value / 256 = Pa).
- *         Returns 0 if the calibration leads to a divide-by-zero.
+ * @return 气压，Q24.8 定点 Pa（即 value / 256 = Pa）。
+ *         校准数据导致除零时返回 0。
  */
 static uint32_t bmp280_compensate_P_int64(int32_t adc_P)
 {
@@ -250,13 +235,12 @@ static uint32_t bmp280_compensate_P_int64(int32_t adc_P)
 
 
 /* ================================================================== */
-/* Public API                                                          */
+/* 公共 API                                                            */
 /* ================================================================== */
 
 Driver_Status BMP280_SetAddress(uint8_t addr7)
 {
-    /* Address selection is locked once Init succeeds (Requirement 4.9
-     * + design constraint: prevents mid-flight bus address changes). */
+    /* Init 成功后地址锁定，防止运行中更改总线地址 */
     if (s_initialized) {
         return DRV_ERR_NOT_INIT;
     }
@@ -276,7 +260,7 @@ Driver_Status BMP280_Init(void)
         return st;
     }
 
-    /* 1. ChipID check (Requirement 4.1, 4.2). */
+    /* 1. ChipID 检查 */
     uint8_t id = 0;
     st = bmp280_read_regs(BMP280_REG_ID, &id, 1u);
     if (st != DRV_OK) {
@@ -287,14 +271,14 @@ Driver_Status BMP280_Init(void)
         goto fail;
     }
 
-    /* 2. Soft reset + wait ≥ 5 ms (Requirement 4.3). */
+    /* 2. 软复位 + 等待 ≥ 5 ms */
     st = bmp280_write_reg(BMP280_REG_RESET, BMP280_RESET_KEY);
     if (st != DRV_OK) {
         goto fail;
     }
     bmp280_delay_ms(BMP280_RESET_WAIT_MS);
 
-    /* 3. Burst-read 24-byte calibration block (Requirement 4.4). */
+    /* 3. 突发读取 24 字节校准块 */
     uint8_t calib_raw[24];
     st = bmp280_read_regs(BMP280_REG_CALIB_T1_LSB, calib_raw, sizeof(calib_raw));
     if (st != DRV_OK) {
@@ -302,7 +286,7 @@ Driver_Status BMP280_Init(void)
     }
     bmp280_parse_calibration(calib_raw);
 
-    /* 4. Configure ctrl_meas + config (Requirement 4.5). */
+    /* 4. 配置 ctrl_meas + config */
     st = bmp280_write_reg(BMP280_REG_CTRL_MEAS, BMP280_CTRL_MEAS_VALUE);
     if (st != DRV_OK) {
         goto fail;
@@ -312,8 +296,7 @@ Driver_Status BMP280_Init(void)
         goto fail;
     }
 
-    /* All good — reset the t_fine cache so the first ReadPressure has to
-     * re-derive it (or the caller may issue ReadTemperature first). */
+    /* 初始化成功——重置 t_fine 缓存，首次 ReadPressure 需先读温度 */
     s_t_fine_valid = false;
     s_t_fine       = 0;
     s_initialized  = true;
@@ -345,7 +328,7 @@ Driver_Status BMP280_GetChipID(uint8_t *id)
 }
 
 /**
- * @brief Internal temperature read; assumes the bus mutex is already held.
+ * @brief 内部温度读取；调用方已持有总线互斥锁。
  */
 static Driver_Status bmp280_read_temperature_locked(float *temp_c)
 {
@@ -392,8 +375,7 @@ Driver_Status BMP280_ReadPressure(float *pressure_pa)
         return st;
     }
 
-    /* Pressure compensation depends on t_fine; if no temperature has been
-     * read since init, run one internally so the result is meaningful. */
+    /* 气压补偿依赖 t_fine；若初始化后尚未读取温度，先内部触发一次以获得有效结果 */
     if (!s_t_fine_valid) {
         float dummy_temp;
         st = bmp280_read_temperature_locked(&dummy_temp);

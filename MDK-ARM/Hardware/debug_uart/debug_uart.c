@@ -1,40 +1,20 @@
 /**
  * @file    debug_uart.c
- * @brief   Debug UART driver (USART1) implementation.
+ * @brief   调试串口驱动（USART1）实现。
  *
- * Spec: .kiro/specs/hardware-base-drivers/{requirements,design,tasks}.md
- *       (task 2.1, Requirements 6.1..6.8).
- *
- * Responsibilities:
- *   - @ref DebugUART_Init verifies the CubeMX-generated @c huart1 handle
- *     points at USART1 and creates an internal serialisation mutex used
- *     by every TX path.  The peripheral itself is *not* re-initialised
- *     (@c MX_USART1_UART_Init in @c Core/Src/usart.c already did that).
- *   - @ref Debug_Log / @ref Debug_Log_Level format into a 256-byte
- *     module-internal buffer with @c vsnprintf, prepend a level prefix
- *     (`[ERR] / [WARN] / [INF] / [DBG] `), and dispatch the buffer to
- *     @c HAL_UART_Transmit with @ref HAL_TIMEOUT_MS.  Output longer than
- *     255 bytes is truncated and a terminating `'\0'` is preserved at
- *     byte 255.
- *   - The runtime filter @c DEBUG_LEVEL_MIN drops messages whose level
- *     is more verbose (numerically greater) than the configured floor.
- *   - When the FreeRTOS scheduler is running, the internal mutex
- *     serialises the formatting buffer and HAL call so multiple tasks
- *     can `printf` concurrently without interleaving.  Before
- *     @c osKernelStart the mutex is bypassed (boot is single-threaded).
- *   - @c printf is redirected to this driver via @c fputc (ARMCC, IAR)
- *     and a weak @c _write (GCC / armclang with newlib) implementation,
- *     so any user-side `printf("...")` ends up on USART1 too.
- *
- * Failure handling: if any of the preconditions for actually emitting
- * the bytes fails (module not init, mutex acquire timeout, HAL TX
- * error, lvl filtered out by `DEBUG_LEVEL_MIN`) the line is silently
- * dropped — *never* is `Debug_Log_Level` called recursively from inside
- * itself.  An internal counter accumulates the drops for diagnostic
- * inspection via @ref Debug_GetDroppedCount.
+ * - DebugUART_Init 验证 CubeMX 生成的 huart1 句柄指向 USART1，
+ *   创建内部串行化互斥锁（不重新初始化外设）。
+ * - Debug_Log / Debug_Log_Level 通过 vsnprintf 格式化到 256 字节静态缓冲区，
+ *   添加等级前缀后调用 HAL_UART_Transmit 发送。超长内容截断，末尾保留 '\0'。
+ * - 运行时过滤器 DEBUG_LEVEL_MIN 丢弃比阈值更冗长的消息。
+ * - FreeRTOS 调度器运行时通过内部互斥锁串行化，调度器未启动时跳过加锁。
+ * - printf 通过 fputc（ARMCC/IAR）和弱符号 _write（GCC/armclang+newlib）
+ *   重定向到本驱动。
+ * - 任何发送失败（未初始化、互斥锁超时、HAL 错误、等级过滤）均静默丢弃，
+ *   不递归调用 Debug_Log_Level，累加计数器供 Debug_GetDroppedCount 查询。
  */
 #include "hardware.h"   /* Driver_Status, DEBUG_LEVEL_t, DEBUG_LEVEL_MIN,
-                         * HAL_TIMEOUT_MS, plus debug_uart.h via facade.    */
+                         * HAL_TIMEOUT_MS，以及通过门面包含的 debug_uart.h */
 #include "usart.h"      /* extern UART_HandleTypeDef huart1                */
 
 #include <stdarg.h>
@@ -46,26 +26,24 @@
 
 
 /* ================================================================== */
-/* Module-private constants                                            */
+/* 模块私有常量                                                        */
 /* ================================================================== */
 
-/** Format / transmit buffer size, in bytes (Requirement 6.3). */
+/** 格式化/发送缓冲区大小（字节）。 */
 #define DEBUG_UART_BUF_SIZE         256u
 
 
 /* ================================================================== */
-/* Module-private state                                                */
+/* 模块私有状态                                                        */
 /* ================================================================== */
 
-/** Static formatting buffer.  Sized exactly per Requirement 6.3 so a
- *  255-byte payload + terminator fits without dynamic allocation.   */
+/** 静态格式化缓冲区，255 字节有效载荷 + 终止符，无需动态分配。 */
 static char            s_buf[DEBUG_UART_BUF_SIZE];
 
-/** Internal serialisation mutex; created lazily in @ref DebugUART_Init. */
+/** 内部串行化互斥锁；在 DebugUART_Init 中创建。 */
 static osMutexId_t     s_dbg_mutex;
 
-/** Mutex name attribute kept in static storage so the CMSIS-RTOS
- *  implementation can hold a long-lived pointer.                    */
+/** 互斥锁名称属性，存于静态存储以保证字符串生命周期。 */
 static const osMutexAttr_t s_dbg_mutex_attr = {
     .name      = "DebugUART",
     .attr_bits = 0u,
@@ -73,17 +51,15 @@ static const osMutexAttr_t s_dbg_mutex_attr = {
     .cb_size   = 0u,
 };
 
-/** True after a successful @ref DebugUART_Init.  Read by every public
- *  API and the C-library redirection hooks.                          */
+/** DebugUART_Init 成功后置 true，所有公共 API 和 C 库重定向钩子均检查此标志。 */
 static bool            s_initialized;
 
-/** Saturating counter of log lines silently dropped (Requirement
- *  diagnostic counter described in design.md §debug_uart).            */
+/** 静默丢弃的日志行计数器，在 UINT32_MAX 处饱和。 */
 static uint32_t        s_dropped;
 
 
 /* ================================================================== */
-/* Helpers                                                              */
+/* 内部辅助函数                                                        */
 /* ================================================================== */
 
 static inline bool dbg_scheduler_running(void)
@@ -92,11 +68,9 @@ static inline bool dbg_scheduler_running(void)
 }
 
 /**
- * @brief Acquire the serialisation mutex if needed.
+ * @brief 调度器运行时获取串行化互斥锁。
  *
- * Returns @c true on success (lock taken or skipped because the
- * scheduler is not yet running).  On osMutexAcquire timeout/error the
- * caller MUST drop the line, so a @c false return is returned.
+ * 成功（已加锁或调度器未运行）返回 true；超时/错误返回 false，调用方应丢弃该行。
  */
 static bool dbg_lock(void)
 {
@@ -104,9 +78,7 @@ static bool dbg_lock(void)
         return true;
     }
     if (s_dbg_mutex == NULL) {
-        /* Defensive: should never happen once Init succeeded, but make
-         * the failure visible (no lock + no UART) instead of an infinite
-         * busy-wait. */
+        /* 防御性检查：Init 成功后不应发生，但避免无限等待 */
         return false;
     }
     return osMutexAcquire(s_dbg_mutex, HAL_TIMEOUT_MS) == osOK;
@@ -119,7 +91,7 @@ static void dbg_unlock(void)
     }
 }
 
-/** Increment @ref s_dropped with saturation at @c UINT32_MAX. */
+/** s_dropped 饱和累加（上限 UINT32_MAX）。 */
 static void dbg_count_drop(void)
 {
     if (s_dropped != UINT32_MAX) {
@@ -127,8 +99,7 @@ static void dbg_count_drop(void)
     }
 }
 
-/** Pick the level prefix.  Returns "" for unknown levels so a stray
- *  cast from upper-layer code can't crash the buffer math.            */
+/** 返回等级前缀字符串；未知等级返回 "" 以防缓冲区计算崩溃。 */
 static const char *dbg_level_prefix(DEBUG_LEVEL_t lvl)
 {
     switch (lvl) {
@@ -141,17 +112,10 @@ static const char *dbg_level_prefix(DEBUG_LEVEL_t lvl)
 }
 
 /**
- * @brief Transmit @p len bytes from @p data on USART1.
+ * @brief 通过 USART1 发送 len 字节。
  *
- * Pre-conditions:
- *   - The serialisation mutex is held (or the scheduler is not running).
- *   - The module is initialised — the caller is responsible for that
- *     check, because the redirection hooks need a fast path that skips
- *     the format step.
- *
- * On HAL failure the dropped counter is incremented and the function
- * returns silently.  We never recurse back into @ref Debug_Log_Level
- * from here.
+ * 前提：调用方已持有串行化互斥锁（或调度器未运行），且模块已初始化。
+ * HAL 失败时累加丢弃计数器，不递归调用 Debug_Log_Level。
  */
 static void dbg_uart_tx(const uint8_t *data, uint16_t len)
 {
@@ -165,17 +129,11 @@ static void dbg_uart_tx(const uint8_t *data, uint16_t len)
 }
 
 /**
- * @brief Build the level prefix + vformatted body in @ref s_buf and
- *        transmit it.
+ * @brief 将等级前缀 + vsnprintf 格式化内容写入 s_buf 并发送。
  *
- * @param lvl  Severity level; treated as filter input as well — values
- *             greater than @c DEBUG_LEVEL_MIN cause an early return
- *             without calling vsnprintf or HAL.
- * @param fmt  printf format string (must not be NULL).
- * @param ap   var-args paired with @p fmt.
- *
- * Mutex / kernel-state handling lives in this function so both the
- * @c Debug_Log* entry points and the @c printf redirection can share it.
+ * @param lvl  严重等级，同时作为过滤输入——大于 DEBUG_LEVEL_MIN 时提前返回。
+ * @param fmt  printf 格式字符串，不得为 NULL。
+ * @param ap   与 fmt 配对的可变参数列表。
  */
 static void dbg_emit(DEBUG_LEVEL_t lvl, const char *fmt, va_list ap)
 {
@@ -183,7 +141,7 @@ static void dbg_emit(DEBUG_LEVEL_t lvl, const char *fmt, va_list ap)
         dbg_count_drop();
         return;
     }
-    /* Requirement 6.7: drop messages whose level is too verbose. */
+    /* 等级过滤：比阈值更冗长的消息直接丢弃 */
     if ((int)lvl > (int)DEBUG_LEVEL_MIN) {
         return;
     }
@@ -193,49 +151,38 @@ static void dbg_emit(DEBUG_LEVEL_t lvl, const char *fmt, va_list ap)
         return;
     }
 
-    /* Stage 1: copy the level prefix into the front of the buffer.  Use
-     * `memcpy` rather than `snprintf` to avoid a second pass through the
-     * formatting machinery (the prefix never contains '%'). */
+    /* 阶段 1：将等级前缀复制到缓冲区头部（前缀不含 '%'，用 memcpy 更高效） */
     const char *prefix     = dbg_level_prefix(lvl);
     size_t      prefix_len = strlen(prefix);
     if (prefix_len >= DEBUG_UART_BUF_SIZE) {
-        /* Should not happen with the current prefixes (≤ 7 bytes), but
-         * be defensive against a future expansion. */
+        /* 当前前缀最长 7 字节，此处为防御性检查 */
         prefix_len = DEBUG_UART_BUF_SIZE - 1u;
     }
     memcpy(s_buf, prefix, prefix_len);
 
-    /* Stage 2: format the user portion into the remainder.  The vsnprintf
-     * contract (C99 §7.19.6.12): writes at most `n - 1` characters then
-     * appends '\0', and returns the number of characters that *would*
-     * have been written had the buffer been large enough — we use that
-     * to detect truncation. */
+    /* 阶段 2：将用户内容格式化到剩余空间。
+     * vsnprintf 写入最多 n-1 个字符后追加 '\0'，返回值为不截断时应写入的字符数。 */
     size_t remaining = DEBUG_UART_BUF_SIZE - prefix_len;
     int    written  = vsnprintf(s_buf + prefix_len, remaining, fmt, ap);
 
     size_t body_len;
     if (written < 0) {
-        /* Encoding error — emit just the prefix so the level tag is
-         * still visible, and count the drop for the body. */
+        /* 编码错误——只发送前缀，正文计入丢弃 */
         body_len = 0u;
         dbg_count_drop();
     } else if ((size_t)written >= remaining) {
-        /* Requirement 6.4: truncate to 255 chars; vsnprintf already
-         * stored the leading 'remaining - 1' bytes plus a '\0' at
-         * `s_buf[DEBUG_UART_BUF_SIZE - 1]`, which is exactly the
-         * "preserve trailing '\0'" contract. */
+        /* 截断：vsnprintf 已在 s_buf[DEBUG_UART_BUF_SIZE-1] 写入 '\0' */
         body_len = remaining - 1u;
     } else {
         body_len = (size_t)written;
     }
 
     size_t total = prefix_len + body_len;
-    /* Belt-and-braces: never exceed buffer size, never let body_len wrap. */
+    /* 防御性检查：不超过缓冲区大小 */
     if (total >= DEBUG_UART_BUF_SIZE) {
         total = DEBUG_UART_BUF_SIZE - 1u;
     }
-    /* Always keep a final '\0' (mostly for debuggers; UART TX only sends
-     * `total` bytes). */
+    /* 保留末尾 '\0'（主要供调试器查看；UART 只发送 total 字节） */
     s_buf[total] = '\0';
 
     dbg_uart_tx((const uint8_t *)s_buf, (uint16_t)total);
@@ -244,20 +191,17 @@ static void dbg_emit(DEBUG_LEVEL_t lvl, const char *fmt, va_list ap)
 
 
 /* ================================================================== */
-/* Public API                                                          */
+/* 公共 API                                                            */
 /* ================================================================== */
 
 Driver_Status DebugUART_Init(void)
 {
-    /* Requirement 6.1: do NOT re-init the peripheral; just verify the
-     * handle CubeMX gave us actually points at USART1. */
+    /* 不重新初始化外设，只验证 CubeMX 生成的句柄指向 USART1 */
     if (huart1.Instance != USART1) {
         return DRV_ERR_PARAM;
     }
 
-    /* Requirement 6.5: per-driver mutex (created here, freed never —
-     * the module is meant to live for the lifetime of the firmware).
-     * If a previous Init created one, reuse it so re-init is idempotent. */
+    /* 创建模块内部互斥锁（已存在则复用，保证 Init 幂等） */
     if (s_dbg_mutex == NULL) {
         s_dbg_mutex = osMutexNew(&s_dbg_mutex_attr);
         if (s_dbg_mutex == NULL) {
@@ -294,26 +238,20 @@ uint32_t Debug_GetDroppedCount(void)
 
 
 /* ================================================================== */
-/* printf redirection                                                  */
+/* printf 重定向                                                       */
 /*                                                                      */
-/* The C-library `printf` family is funneled through the same dropped-  */
-/* line accounting and scheduler-aware locking as Debug_Log_Level.      */
-/* Two implementations are provided side-by-side, gated on the          */
-/* compiler:                                                            */
-/*   - ARMCC v5 / IAR / armclang's "armlink" stdio: implements `fputc`. */
-/*   - GCC / armclang with newlib: implements weak `_write`.            */
-/* Both push bytes through @c dbg_putc_locked which centralises the     */
-/* mutex + HAL_UART_Transmit logic, mirroring @c dbg_emit's contract.   */
+/* C 库 printf 系列通过与 Debug_Log_Level 相同的丢弃计数和调度器感知   */
+/* 加锁机制发送。提供两种实现：                                         */
+/*   - ARMCC v5/v6 / IAR / armclang armlibc：实现 fputc。              */
+/*   - GCC / armclang + newlib：实现弱符号 _write。                    */
+/* 两者均通过 dbg_putc_locked 集中处理互斥锁和 HAL_UART_Transmit。    */
 /* ================================================================== */
 
 /**
- * @brief Send a single byte through USART1 with the same locking +
- *        drop-counting policy as @ref Debug_Log_Level.
+ * @brief 通过 USART1 发送单字节，与 Debug_Log_Level 使用相同的加锁和丢弃策略。
  *
- * Used by both stdio redirections so they get a consistent treatment
- * (no garbled output between tasks; lost bytes counted; safe before
- * @c DebugUART_Init).  Returns @c true if the byte was queued to
- * the HAL successfully, @c false otherwise.
+ * 供两种 stdio 重定向共用，保证多任务下不乱序，丢失字节被计数，
+ * DebugUART_Init 之前调用安全。成功返回 true，否则返回 false。
  */
 static bool dbg_putc_locked(uint8_t ch)
 {
@@ -335,16 +273,8 @@ static bool dbg_putc_locked(uint8_t ch)
 }
 
 #if defined(__ARMCC_VERSION) || defined(__CC_ARM) || defined(__ICCARM__)
-/* Keil ArmCompiler (both AC5 and AC6 with armlibc/microlib) and IAR
- * funnel C-library output through @c fputc as the single retarget point.
- * @c __ARMCC_VERSION covers AC5 (e.g. 5060960) and AC6 (e.g. 6160000+);
- * @c __CC_ARM is defined only by AC5, and @c __ICCARM__ by IAR — listing
- * all three keeps the hook compiled in regardless of the toolset.
- *
- * Note: we deliberately do *not* call @c dbg_lock here, because
- * @c dbg_putc_locked already does — @c fputc is one byte per call and we
- * want at least byte-level safety even if the user calls @c printf in a
- * tight loop. */
+/* Keil ArmCompiler（AC5/AC6）和 IAR 通过 fputc 重定向 C 库输出。
+ * 注意：此处不调用 dbg_lock，因为 dbg_putc_locked 内部已加锁。 */
 int fputc(int ch, FILE *f)
 {
     (void)f;
@@ -356,12 +286,9 @@ int fputc(int ch, FILE *f)
 #endif /* Keil AC5 / AC6 / IAR */
 
 #if defined(__GNUC__) && !defined(__ARMCC_VERSION)
-/* Plain GCC (arm-none-eabi-gcc with newlib) funnels stdio through
- * `_write(int fd, const char *buf, int len)` — implementing it (weakly)
- * is the canonical way to retarget @c printf.  Excluded for armclang
- * (which also defines @c __GNUC__) because armclang's library uses the
- * @c fputc hook above instead.  Marked @c weak so an application can
- * override the routing later (USB-CDC, SD-card log, etc.). */
+/* 纯 GCC（arm-none-eabi-gcc + newlib）通过弱符号 _write 重定向 printf。
+ * armclang 也定义 __GNUC__，但其库使用上方的 fputc，故此处排除。
+ * 标记为 weak 允许应用层覆盖（如重定向到 USB-CDC、SD 卡日志等）。 */
 __attribute__((weak)) int _write(int fd, const char *buf, int len)
 {
     (void)fd;
@@ -371,8 +298,7 @@ __attribute__((weak)) int _write(int fd, const char *buf, int len)
     int sent = 0;
     for (int i = 0; i < len; ++i) {
         if (!dbg_putc_locked((uint8_t)buf[i])) {
-            /* Tell newlib how many bytes actually made it out so it can
-             * surface a partial-write to the caller. */
+            /* 告知 newlib 实际发出的字节数，以便上层感知部分写入 */
             return sent;
         }
         sent++;

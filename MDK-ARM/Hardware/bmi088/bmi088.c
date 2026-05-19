@@ -1,149 +1,122 @@
 /**
  * @file    bmi088.c
- * @brief   BMI088 6-axis IMU driver (SPI1, dual CS PC4/PC5).
+ * @brief   BMI088 六轴 IMU 驱动（SPI1，双片选 PC4/PC5）实现。
  *
- * Spec: .kiro/specs/hardware-base-drivers/{requirements,design,tasks}.md
- *       (task 5.1, Requirements 2.1..2.12, 8.6)
+ * SPI 读协议差异（BMI088 数据手册 §6.1.2 / §6.1.3）：
+ *   - 加速度计读取：地址字节后需一个哑字节，事务共发 len+2 字节，
+ *     保留 rx[2..2+len-1]。
+ *   - 陀螺仪读取：无哑字节，事务共发 len+1 字节，保留 rx[1..len]。
+ *   - 单寄存器写入：2 字节 [reg, value]。
  *
- * Bus framing:
- *   - SPI peripheral           = SPI1 (`hspi1`).
- *   - Accelerometer CS         = PC4 (`BMI_ACC_CS_Pin`, active-low).
- *   - Gyroscope CS             = PC5 (`BMI_GYRO_CS_Pin`, active-low).
- *
- * Read protocol differences between the two dies (BMI088 datasheet
- * §6.1.2 / §6.1.3):
- *   - Accelerometer SPI read drops one dummy byte after the address byte.
- *     A read transaction therefore emits `len + 2` bytes:
- *         [ reg | 0x80, 0x00 (dummy), 0x00 ... 0x00 (len bytes) ]
- *     and we keep `rx[2 .. 2 + len - 1]`.
- *   - Gyroscope SPI read has no dummy, so a transaction emits `len + 1`
- *     bytes:
- *         [ reg | 0x80, 0x00 ... 0x00 (len bytes) ]
- *     and we keep `rx[1 .. len]`.
- *   - Single-register writes are exactly 2 bytes: `[reg, value]`.
- *
- * Concurrency: every public API acquires `SPIMutexHandle` via
- * `osMutexAcquire(SPIMutexHandle, HAL_TIMEOUT_MS)` while the FreeRTOS
- * scheduler is running, and releases it (along with both CS lines) on
- * every return path. Before scheduler start the lock is bypassed because
- * boot is single-threaded.
- *
- * HAL return codes are mapped through `Driver_MapHalStatus` so the
- * caller observes the unified `Driver_Status` enum.
+ * 并发：所有公共 API 在调度器运行时通过 SPIMutexHandle 加锁，
+ * 调度器未启动时跳过加锁（单线程启动阶段）。
+ * HAL 返回码通过 Driver_MapHalStatus 映射为统一的 Driver_Status。
  */
-/* hardware.h first: it owns the Driver_Status enum and HAL_TIMEOUT_MS, and
- * re-exports bmi088.h as part of the aggregate facade. Including the
- * aggregate header keeps this driver's translation unit consistent with the
- * sibling drivers (bmp280.c, ist8310.c) and with what application code sees. */
+/* 先包含 hardware.h：它拥有 Driver_Status 枚举和 HAL_TIMEOUT_MS，
+ * 并通过聚合门面重新导出 bmi088.h。 */
 #include "hardware.h"   /* Driver_Status, HAL_TIMEOUT_MS, Driver_MapHalStatus */
 #include "spi.h"        /* extern hspi1 */
-#include "main.h"       /* BMI_ACC_CS_Pin, BMI_GYRO_CS_Pin (host shim mirrors these) */
+#include "main.h"       /* BMI_ACC_CS_Pin, BMI_GYRO_CS_Pin */
 
 #include <math.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
-/* M_PI is not part of strict ISO C; define a portable fallback that
- * matches the value <math.h> would supply on POSIX systems. */
+/* M_PI 不属于严格 ISO C，提供可移植的备用定义 */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
 /* ------------------------------------------------------------------ */
-/* Shared SPI bus mutex (created by CubeMX in Core/Src/freertos.c).    */
-/* The host test harness defines its own storage in mock_handles.c.   */
+/* 共享 SPI 总线互斥锁（由 CubeMX 在 Core/Src/freertos.c 中创建）     */
 /* ------------------------------------------------------------------ */
 extern osMutexId_t SPIMutexHandle;
 
 /* ------------------------------------------------------------------ */
-/* BMI088 register map — only addresses used by this driver are named. */
+/* BMI088 寄存器映射——仅列出本驱动使用的地址                          */
 /* ------------------------------------------------------------------ */
 
-/* --- Accelerometer (slave A) --- */
-#define BMI_ACC_REG_CHIP_ID         0x00u   /* expect 0x1E                                  */
-#define BMI_ACC_REG_DATA            0x12u   /* burst start: ACC_X_LSB..ACC_Z_MSB (6 bytes)  */
+/* --- 加速度计（从机 A）--- */
+#define BMI_ACC_REG_CHIP_ID         0x00u   /* 期望值 0x1E                                  */
+#define BMI_ACC_REG_DATA            0x12u   /* 突发起始：ACC_X_LSB..ACC_Z_MSB（6 字节）     */
 #define BMI_ACC_REG_CONF            0x40u   /* ODR / BW                                     */
-#define BMI_ACC_REG_RANGE           0x41u   /* full-scale range                             */
-#define BMI_ACC_REG_PWR_CTRL        0x7Du   /* power control (normal / suspend)             */
-#define BMI_ACC_REG_SOFTRESET       0x7Eu   /* write 0xB6 to soft-reset                     */
+#define BMI_ACC_REG_RANGE           0x41u   /* 量程                                         */
+#define BMI_ACC_REG_PWR_CTRL        0x7Du   /* 电源控制（Normal / Suspend）                 */
+#define BMI_ACC_REG_SOFTRESET       0x7Eu   /* 写 0xB6 触发软复位                           */
 
-/* --- Gyroscope (slave G) --- */
-#define BMI_GYRO_REG_CHIP_ID        0x00u   /* expect 0x0F                                  */
-#define BMI_GYRO_REG_DATA           0x02u   /* burst start: RATE_X_LSB..RATE_Z_MSB (6 bytes)*/
-#define BMI_GYRO_REG_RANGE          0x0Fu   /* full-scale range                             */
+/* --- 陀螺仪（从机 G）--- */
+#define BMI_GYRO_REG_CHIP_ID        0x00u   /* 期望值 0x0F                                  */
+#define BMI_GYRO_REG_DATA           0x02u   /* 突发起始：RATE_X_LSB..RATE_Z_MSB（6 字节）   */
+#define BMI_GYRO_REG_RANGE          0x0Fu   /* 量程                                         */
 #define BMI_GYRO_REG_BANDWIDTH      0x10u   /* ODR / BW                                     */
 
-/* Expected chip-ID values. */
+/* 期望的 Chip ID 值 */
 #define BMI_ACC_CHIP_ID             0x1Eu
 #define BMI_GYRO_CHIP_ID            0x0Fu
 
-/* Register values used during init (kept symbolic for traceability). */
-#define BMI_ACC_SOFTRESET_VALUE     0xB6u   /* same as BMP280 soft-reset value, by design */
+/* 初始化时使用的寄存器值 */
+#define BMI_ACC_SOFTRESET_VALUE     0xB6u   /* 与 BMP280 软复位值相同 */
 #define BMI_ACC_RANGE_6G            0x01u   /* ±6 g                                       */
-#define BMI_ACC_CONF_OSR4_800HZ     0xABu   /* OSR4, ODR = 800 Hz                         */
-#define BMI_ACC_PWR_CTRL_NORMAL     0x04u   /* accelerometer ON                           */
+#define BMI_ACC_CONF_OSR4_800HZ     0xABu   /* OSR4，ODR = 800 Hz                         */
+#define BMI_ACC_PWR_CTRL_NORMAL     0x04u   /* 加速度计开启                               */
 #define BMI_GYRO_RANGE_2000DPS      0x01u   /* ±2000 °/s                                  */
 #define BMI_GYRO_BW_1000_116        0x02u   /* ODR 1000 Hz / 3-dB BW 116 Hz               */
 
-/* SPI access flags. */
-#define BMI_SPI_READ_BIT            0x80u   /* OR'd into the address byte for reads */
+/* SPI 访问标志 */
+#define BMI_SPI_READ_BIT            0x80u   /* 读操作时与地址字节 OR */
 
-/* Soft-reset settling time (datasheet §5.4): typical 30 ms; spec 50 ms. */
+/* 软复位稳定时间（数据手册 §5.4）：典型 30 ms，规格 50 ms */
 #define BMI_ACC_SOFT_RESET_DELAY_MS 50u
 
 /* ------------------------------------------------------------------ */
-/* Sensitivity / unit conversion                                       */
+/* 灵敏度 / 单位转换                                                   */
 /* ------------------------------------------------------------------ */
 
-/** Accelerometer sensitivity at ±6 g full scale: 5460 LSB/g (datasheet §5.3). */
+/** 加速度计 ±6g 量程灵敏度：5460 LSB/g（数据手册 §5.3）。 */
 #define BMI_ACC_LSB_PER_G           5460.0f
-/** Standard gravity, m/s². */
+/** 标准重力加速度，m/s²。 */
 #define BMI_GRAVITY_MS2             9.80665f
-/** Gyro sensitivity at ±2000 °/s full scale: 16.384 LSB/(°/s) (datasheet §5.2). */
+/** 陀螺仪 ±2000°/s 量程灵敏度：16.384 LSB/(°/s)（数据手册 §5.2）。 */
 #define BMI_GYRO_LSB_PER_DPS        16.384f
-/** Degrees → radians scaling factor. */
+/** 角度转弧度系数。 */
 #define BMI_DEG_TO_RAD              ((float)M_PI / 180.0f)
 
 /* ------------------------------------------------------------------ */
-/* Module state                                                        */
+/* 模块状态                                                            */
 /* ------------------------------------------------------------------ */
 
-/** Set true at the end of a successful `BMI088_Init`; gates all reads. */
+/** BMI088_Init 成功完成后置 true，用于门控所有读取操作。 */
 static bool s_initialized = false;
 
 /* ------------------------------------------------------------------ */
-/* CS line helpers                                                     */
-/*                                                                      */
-/* On the real target `BMI_ACC_CS_Pin` / `BMI_GYRO_CS_Pin` come from   */
-/* `main.h`; on host they are provided by `stm32h7xx_hal_gpio.h`.       */
+/* 片选辅助函数                                                        */
 /* ------------------------------------------------------------------ */
 
-/** Drive PC4 low + PC5 high to select the accelerometer die. */
+/** 拉低 PC4、拉高 PC5，选中加速度计。 */
 static inline void bmi_acc_select(void)
 {
-    HAL_GPIO_WritePin(GPIOC, BMI_ACC_CS_Pin,  GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOC, BMI_GYRO_CS_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(BMI_ACC_CS_GPIO_Port,  BMI_ACC_CS_Pin,  GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(BMI_GYRO_CS_GPIO_Port, BMI_GYRO_CS_Pin, GPIO_PIN_SET);
 }
 
-/** Drive PC4 high + PC5 low to select the gyroscope die. */
+/** 拉高 PC4、拉低 PC5，选中陀螺仪。 */
 static inline void bmi_gyro_select(void)
 {
-    HAL_GPIO_WritePin(GPIOC, BMI_ACC_CS_Pin,  GPIO_PIN_SET);
-    HAL_GPIO_WritePin(GPIOC, BMI_GYRO_CS_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(BMI_ACC_CS_GPIO_Port,  BMI_ACC_CS_Pin,  GPIO_PIN_SET);
+    HAL_GPIO_WritePin(BMI_GYRO_CS_GPIO_Port, BMI_GYRO_CS_Pin, GPIO_PIN_RESET);
 }
 
-/** Drive both CS lines high (idle / deselect). Always called on every
- *  exit path of every transaction so that no die is left selected if a
- *  HAL error occurs mid-transfer. */
+/** 拉高两路片选（空闲/取消选中）。每次事务的所有退出路径均调用此函数，
+ *  确保 HAL 错误发生时不会遗留已选中的芯片。 */
 static inline void bmi_deselect_all(void)
 {
-    HAL_GPIO_WritePin(GPIOC, BMI_ACC_CS_Pin,  GPIO_PIN_SET);
-    HAL_GPIO_WritePin(GPIOC, BMI_GYRO_CS_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(BMI_ACC_CS_GPIO_Port,  BMI_ACC_CS_Pin,  GPIO_PIN_SET);
+    HAL_GPIO_WritePin(BMI_GYRO_CS_GPIO_Port, BMI_GYRO_CS_Pin, GPIO_PIN_SET);
 }
 
 /* ------------------------------------------------------------------ */
-/* RTOS helpers                                                        */
+/* RTOS 辅助函数                                                       */
 /* ------------------------------------------------------------------ */
 
 static inline bool bmi_scheduler_running(void)
@@ -152,10 +125,9 @@ static inline bool bmi_scheduler_running(void)
 }
 
 /**
- * @brief Acquire the shared SPI bus mutex if the scheduler is running.
+ * @brief 调度器运行时获取共享 SPI 总线互斥锁。
  *
- * Returns @ref DRV_OK if the lock was taken (or skipped because the
- * scheduler is not yet running), @ref DRV_ERR_TIMEOUT otherwise.
+ * @return DRV_OK 已加锁或调度器未运行；DRV_ERR_TIMEOUT 超时。
  */
 static Driver_Status bmi_bus_lock(void)
 {
@@ -168,7 +140,7 @@ static Driver_Status bmi_bus_lock(void)
     return DRV_OK;
 }
 
-/** Release the shared SPI bus mutex; no-op if the scheduler is inactive. */
+/** 调度器运行时释放 SPI 总线互斥锁；调度器未运行时为空操作。 */
 static void bmi_bus_unlock(void)
 {
     if (bmi_scheduler_running()) {
@@ -176,8 +148,7 @@ static void bmi_bus_unlock(void)
     }
 }
 
-/** RTOS-aware delay: `osDelay` when the scheduler is running, `HAL_Delay`
- *  during boot. */
+/** 调度器感知延时：调度器运行时用 osDelay，启动阶段用 HAL_Delay。 */
 static void bmi_delay_ms(uint32_t ms)
 {
     if (bmi_scheduler_running()) {
@@ -188,18 +159,14 @@ static void bmi_delay_ms(uint32_t ms)
 }
 
 /* ------------------------------------------------------------------ */
-/* Low-level SPI primitives                                            */
+/* 底层 SPI 原语                                                       */
 /*                                                                      */
-/* These helpers assume:                                                */
-/*   - The bus mutex is already held by the caller.                     */
-/*   - The relevant CS line is already driven low by the caller.        */
-/* They never touch CS lines themselves so the caller can keep CS low   */
-/* across multiple writes (e.g. burst init sequences).                  */
+/* 前提：调用方已持有总线互斥锁，且已拉低对应片选。                    */
+/* 这些辅助函数不操作片选，允许调用方在多次写入间保持片选低电平。      */
 /* ------------------------------------------------------------------ */
 
 /**
- * @brief Read `len` bytes starting at register `reg` from the
- *        accelerometer die.
+ * @brief 从加速度计寄存器 reg 开始读取 len 字节。
  *
  * Emits `len + 2` SPI bytes, discards the address echo and dummy byte.
  *
@@ -207,8 +174,7 @@ static void bmi_delay_ms(uint32_t ms)
  */
 static Driver_Status bmi_acc_read(uint8_t reg, uint8_t *buf, uint16_t len)
 {
-    /* Maximum payload used by this driver is 6 bytes (data burst), so
-     * `len + 2 <= 8`. We cap at 16 to leave room for future growth. */
+    /* 本驱动最大有效载荷为 6 字节（数据突发），len+2 ≤ 8，上限设为 16 */
     enum { BMI_ACC_MAX_FRAME = 16 };
     if (buf == NULL || len == 0 || (uint16_t)(len + 2) > BMI_ACC_MAX_FRAME) {
         return DRV_ERR_PARAM;
@@ -218,7 +184,7 @@ static Driver_Status bmi_acc_read(uint8_t reg, uint8_t *buf, uint16_t len)
     uint8_t rx[BMI_ACC_MAX_FRAME] = { 0 };
 
     tx[0] = (uint8_t)(reg | BMI_SPI_READ_BIT);
-    /* tx[1..len+1] already zero (dummy + clocking bytes). */
+    /* tx[1..len+1] 已为零（哑字节 + 时钟字节） */
 
     HAL_StatusTypeDef hs = HAL_SPI_TransmitReceive(&hspi1,
                                                    tx, rx,
@@ -227,7 +193,7 @@ static Driver_Status bmi_acc_read(uint8_t reg, uint8_t *buf, uint16_t len)
     if (hs != HAL_OK) {
         return Driver_MapHalStatus(hs);
     }
-    /* rx[0] = address echo, rx[1] = dummy; payload starts at rx[2]. */
+    /* rx[0] = 地址回显，rx[1] = 哑字节；有效数据从 rx[2] 开始 */
     for (uint16_t i = 0; i < len; ++i) {
         buf[i] = rx[i + 2u];
     }
@@ -235,9 +201,9 @@ static Driver_Status bmi_acc_read(uint8_t reg, uint8_t *buf, uint16_t len)
 }
 
 /**
- * @brief Read `len` bytes starting at register `reg` from the gyroscope die.
+ * @brief 从陀螺仪寄存器 reg 开始读取 len 字节。
  *
- * Emits `len + 1` SPI bytes, discards the address echo only (no dummy).
+ * 发送 len+1 字节，仅丢弃地址回显（无哑字节）。
  */
 static Driver_Status bmi_gyro_read(uint8_t reg, uint8_t *buf, uint16_t len)
 {
@@ -265,10 +231,9 @@ static Driver_Status bmi_gyro_read(uint8_t reg, uint8_t *buf, uint16_t len)
 }
 
 /**
- * @brief Write a single byte `value` to register `reg`.
+ * @brief 向寄存器 reg 写入单字节 value。
  *
- * The same 2-byte frame works for both dies because writes never need a
- * dummy byte. The MSB of the address byte is left clear (= write).
+ * 两个芯片的写操作均为 2 字节帧，无需哑字节。地址字节 MSB 清零（写操作）。
  */
 static Driver_Status bmi_write_reg(uint8_t reg, uint8_t value)
 {
@@ -280,7 +245,7 @@ static Driver_Status bmi_write_reg(uint8_t reg, uint8_t value)
 }
 
 /* ------------------------------------------------------------------ */
-/* Per-die single-byte register helpers (CS is owned by these helpers) */
+/* 各芯片单字节寄存器辅助函数（片选由这些函数管理）                   */
 /* ------------------------------------------------------------------ */
 
 static Driver_Status bmi_acc_read_reg(uint8_t reg, uint8_t *value)
@@ -316,7 +281,7 @@ static Driver_Status bmi_gyro_write_reg(uint8_t reg, uint8_t value)
 }
 
 /* ------------------------------------------------------------------ */
-/* Public API                                                          */
+/* 公共 API                                                            */
 /* ------------------------------------------------------------------ */
 
 Driver_Status BMI088_Init(void)
@@ -326,16 +291,12 @@ Driver_Status BMI088_Init(void)
         return st;
     }
 
-    /* Make sure both CS lines start high so the reconfiguration of the
-     * SPI peripheral cannot corrupt an in-flight transaction. */
+    /* 确保两路片选初始为高电平，防止 SPI 外设重配置时干扰进行中的事务 */
     bmi_deselect_all();
 
-    /* ---------------------------------------------------------------- */
-    /* Step 1: patch CubeMX-generated DataSize anomaly.                  */
-    /* `CloudFlyIMU.ioc` configures SPI1 with `SPI_DATASIZE_4BIT`, which */
-    /* is invalid for the BMI088. Override the field on the live handle */
-    /* and re-init the peripheral before any byte is exchanged.         */
-    /* ---------------------------------------------------------------- */
+    /* 步骤 1：修正 CubeMX 生成的 DataSize 异常。
+     * CloudFlyIMU.ioc 将 SPI1 配置为 SPI_DATASIZE_4BIT，对 BMI088 无效。
+     * 在实际句柄上覆盖该字段并重新初始化外设，确保字节交换前配置正确。 */
     hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
     HAL_StatusTypeDef hs = HAL_SPI_Init(&hspi1);
     if (hs != HAL_OK) {
@@ -344,9 +305,7 @@ Driver_Status BMI088_Init(void)
         return Driver_MapHalStatus(hs);
     }
 
-    /* ---------------------------------------------------------------- */
-    /* Step 2: accelerometer soft-reset (datasheet §5.4) + 50 ms wait.  */
-    /* ---------------------------------------------------------------- */
+    /* 步骤 2：加速度计软复位（数据手册 §5.4）+ 等待 50 ms */
     st = bmi_acc_write_reg(BMI_ACC_REG_SOFTRESET, BMI_ACC_SOFTRESET_VALUE);
     if (st != DRV_OK) {
         bmi_deselect_all();
@@ -355,20 +314,15 @@ Driver_Status BMI088_Init(void)
     }
     bmi_delay_ms(BMI_ACC_SOFT_RESET_DELAY_MS);
 
-    /* ---------------------------------------------------------------- */
-    /* Step 3: dummy Chip-ID read to wake the accelerometer SPI engine. */
-    /* The first SPI access after soft-reset returns garbage; per the   */
-    /* datasheet the slave needs one transaction with CS toggled to     */
-    /* leave I2C and enter SPI mode. Discard the result.                */
-    /* ---------------------------------------------------------------- */
+    /* 步骤 3：哑读 Chip-ID 以唤醒加速度计 SPI 引擎。
+     * 软复位后首次 SPI 访问返回垃圾数据；需一次带片选切换的事务
+     * 使芯片从 I2C 模式切换到 SPI 模式。丢弃结果。 */
     {
         uint8_t dummy = 0;
         (void)bmi_acc_read_reg(BMI_ACC_REG_CHIP_ID, &dummy);
     }
 
-    /* ---------------------------------------------------------------- */
-    /* Step 4: verify accelerometer Chip ID = 0x1E.                     */
-    /* ---------------------------------------------------------------- */
+    /* 步骤 4：验证加速度计 Chip ID = 0x1E */
     uint8_t acc_id = 0;
     st = bmi_acc_read_reg(BMI_ACC_REG_CHIP_ID, &acc_id);
     if (st != DRV_OK) {
@@ -382,9 +336,7 @@ Driver_Status BMI088_Init(void)
         return DRV_ERR_ID;
     }
 
-    /* ---------------------------------------------------------------- */
-    /* Step 5: verify gyroscope Chip ID = 0x0F.                         */
-    /* ---------------------------------------------------------------- */
+    /* 步骤 5：验证陀螺仪 Chip ID = 0x0F */
     uint8_t gyro_id = 0;
     st = bmi_gyro_read_reg(BMI_GYRO_REG_CHIP_ID, &gyro_id);
     if (st != DRV_OK) {
@@ -398,12 +350,10 @@ Driver_Status BMI088_Init(void)
         return DRV_ERR_ID;
     }
 
-    /* ---------------------------------------------------------------- */
-    /* Step 6: configure accelerometer.                                 */
-    /*   0x41 ← 0x01 (range = ±6 g)                                     */
-    /*   0x40 ← 0xAB (ODR = 800 Hz, BW = OSR4)                          */
-    /*   0x7D ← 0x04 (power-control = Normal)                           */
-    /* ---------------------------------------------------------------- */
+    /* 步骤 6：配置加速度计
+     *   0x41 ← 0x01（量程 = ±6 g）
+     *   0x40 ← 0xAB（ODR = 800 Hz，BW = OSR4）
+     *   0x7D ← 0x04（电源控制 = Normal）*/
     st = bmi_acc_write_reg(BMI_ACC_REG_RANGE,    BMI_ACC_RANGE_6G);
     if (st != DRV_OK) { bmi_deselect_all(); bmi_bus_unlock(); return st; }
     st = bmi_acc_write_reg(BMI_ACC_REG_CONF,     BMI_ACC_CONF_OSR4_800HZ);
@@ -411,17 +361,15 @@ Driver_Status BMI088_Init(void)
     st = bmi_acc_write_reg(BMI_ACC_REG_PWR_CTRL, BMI_ACC_PWR_CTRL_NORMAL);
     if (st != DRV_OK) { bmi_deselect_all(); bmi_bus_unlock(); return st; }
 
-    /* ---------------------------------------------------------------- */
-    /* Step 7: configure gyroscope.                                     */
-    /*   0x0F ← 0x01 (range = ±2000 °/s)                                */
-    /*   0x10 ← 0x02 (ODR 1000 Hz / BW 116 Hz)                          */
-    /* ---------------------------------------------------------------- */
+    /* 步骤 7：配置陀螺仪
+     *   0x0F ← 0x01（量程 = ±2000 °/s）
+     *   0x10 ← 0x02（ODR 1000 Hz / BW 116 Hz）*/
     st = bmi_gyro_write_reg(BMI_GYRO_REG_RANGE,     BMI_GYRO_RANGE_2000DPS);
     if (st != DRV_OK) { bmi_deselect_all(); bmi_bus_unlock(); return st; }
     st = bmi_gyro_write_reg(BMI_GYRO_REG_BANDWIDTH, BMI_GYRO_BW_1000_116);
     if (st != DRV_OK) { bmi_deselect_all(); bmi_bus_unlock(); return st; }
 
-    /* All configuration succeeded — flip the gate. */
+    /* 所有配置成功——开启门控标志 */
     s_initialized = true;
 
     bmi_deselect_all();

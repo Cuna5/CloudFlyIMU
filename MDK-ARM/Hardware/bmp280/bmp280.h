@@ -1,20 +1,14 @@
 /**
  * @file    bmp280.h
- * @brief   BMP280 temperature/pressure driver (I2C1).
+ * @brief   BMP280 温度/气压传感器驱动（I2C1）公共 API。
  *
- * Implementation lives in `bmp280.c` (task 3.1).
+ * 实现位于 bmp280.c。
+ * 本头文件通过 common/hardware.h 聚合导出，应用层不应直接包含本文件。
  *
- * Public API contract (Driver_Status return type, error codes, mutex
- * handling, scheduler-aware delays) follows the conventions defined in
- * @ref hardware.h. This header MUST be reached via `#include "hardware.h"`,
- * never included directly by application code.
- *
- * Key constants:
- *   - 7-bit I2C address: 0x76 (default) or 0x77 (selectable via
- *     @ref BMP280_SetAddress before @ref BMP280_Init).
- *   - Chip ID register 0xD0 must read back 0x58.
- *
- * Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9, 4.10, 8.6.
+ * 关键常量：
+ *   - 7-bit I2C 地址：0x76（默认）或 0x77（在 BMP280_Init 之前通过
+ *     BMP280_SetAddress 选择）。
+ *   - Chip ID 寄存器 0xD0 应读回 0x58。
  */
 #ifndef BMP280_H
 #define BMP280_H
@@ -25,87 +19,70 @@ extern "C" {
 
 #include <stdint.h>
 
-/* This header is included from `common/hardware.h` AFTER the shared
- * Driver_Status enum and project-wide tunables (HAL_TIMEOUT_MS, etc.)
- * have been defined, so we can refer to `Driver_Status` directly here.
- *
- * Application code MUST include "hardware.h" rather than this file.
- */
+/* 本头文件由 common/hardware.h 在定义 Driver_Status 等共享类型之后包含，
+ * 因此可直接使用 Driver_Status。应用层必须通过 "hardware.h" 包含本文件。 */
 
 /**
- * @brief Select the I2C 7-bit address used by the BMP280 module.
+ * @brief 选择 BMP280 使用的 I2C 7-bit 地址。
  *
- * Must be called BEFORE @ref BMP280_Init. Only `0x76` and `0x77` are
- * legal values.
+ * 必须在 BMP280_Init 之前调用。仅接受 0x76 和 0x77。
  *
- * @retval DRV_OK            Address accepted.
- * @retval DRV_ERR_PARAM     `addr7` is neither 0x76 nor 0x77.
- * @retval DRV_ERR_NOT_INIT  @ref BMP280_Init has already completed; the
- *                           address is locked from this point on.
+ * @return DRV_OK 地址已接受；DRV_ERR_PARAM addr7 不是 0x76 或 0x77；
+ *         DRV_ERR_NOT_INIT BMP280_Init 已完成，地址已锁定。
  */
 Driver_Status BMP280_SetAddress(uint8_t addr7);
 
 /**
- * @brief Initialise the BMP280 over I2C1.
+ * @brief 通过 I2C1 初始化 BMP280。
  *
- * Sequence:
- *   1. Read register 0xD0; verify ChipID == 0x58.
- *   2. Soft reset (write 0xE0 = 0xB6) and wait at least 5 ms.
- *   3. Burst read 24 bytes from 0x88 to populate dig_T1..T3, dig_P1..P9.
- *   4. Write 0xF4 = 0x57 (temp ×2, pres ×16, Normal mode).
- *   5. Write 0xF5 = 0x90 (standby 62.5 ms, IIR coefficient 16).
+ * 步骤：
+ *   1. 读寄存器 0xD0，验证 ChipID == 0x58。
+ *   2. 软复位（写 0xE0 = 0xB6），等待至少 5 ms。
+ *   3. 从 0x88 突发读取 24 字节，解析 dig_T1..T3、dig_P1..P9。
+ *   4. 写 0xF4 = 0x57（温度 ×2，气压 ×16，Normal 模式）。
+ *   5. 写 0xF5 = 0x90（待机 62.5 ms，IIR 系数 16）。
  *
- * @retval DRV_OK          Driver ready.
- * @retval DRV_ERR_ID      ChipID mismatch.
- * @retval DRV_ERR_BUS     HAL returned HAL_ERROR/HAL_BUSY.
- * @retval DRV_ERR_TIMEOUT HAL or mutex acquire timed out.
+ * @return DRV_OK 成功；DRV_ERR_ID ChipID 不匹配；
+ *         DRV_ERR_BUS HAL 返回 HAL_ERROR/HAL_BUSY；
+ *         DRV_ERR_TIMEOUT HAL 或互斥锁超时。
  */
 Driver_Status BMP280_Init(void);
 
 /**
- * @brief Read a compensated temperature sample.
+ * @brief 读取补偿后的温度值。
  *
- * Reads 3 raw bytes from 0xFA..0xFC and applies the datasheet
- * compensation formula. Updates the module-internal `t_fine` value
- * required by @ref BMP280_ReadPressure.
+ * 从 0xFA..0xFC 读取 3 字节原始数据，按数据手册补偿公式计算。
+ * 同时更新内部 t_fine 值（BMP280_ReadPressure 需要）。
  *
- * @param[out] temp_c  Temperature in degrees Celsius (≥ 0.01 ℃ resolution).
- *
- * @retval DRV_OK            Success; `*temp_c` updated.
- * @retval DRV_ERR_PARAM     `temp_c` is NULL.
- * @retval DRV_ERR_NOT_INIT  Driver has not been initialised.
- * @retval DRV_ERR_BUS / DRV_ERR_TIMEOUT  Bus failure (per HAL mapping).
+ * @param temp_c  输出温度，摄氏度（分辨率 ≥ 0.01 ℃）。
+ * @return DRV_OK 成功；DRV_ERR_PARAM temp_c 为 NULL；
+ *         DRV_ERR_NOT_INIT 驱动未初始化；
+ *         DRV_ERR_BUS / DRV_ERR_TIMEOUT 总线错误。
  */
 Driver_Status BMP280_ReadTemperature(float *temp_c);
 
 /**
- * @brief Read a compensated pressure sample.
+ * @brief 读取补偿后的气压值。
  *
- * If a temperature has not been read since init, an internal temperature
- * read is triggered first to obtain a valid `t_fine`. Then 3 raw bytes
- * are read from 0xF7..0xF9 and the int64 datasheet formula is applied.
+ * 若初始化后尚未读取过温度，内部先触发一次温度读取以获得有效 t_fine，
+ * 再从 0xF7..0xF9 读取 3 字节，按数据手册 int64 补偿公式计算。
  *
- * @param[out] pressure_pa  Pressure in Pascals.
- *
- * @retval DRV_OK            Success; `*pressure_pa` updated.
- * @retval DRV_ERR_PARAM     `pressure_pa` is NULL.
- * @retval DRV_ERR_NOT_INIT  Driver has not been initialised.
- * @retval DRV_ERR_BUS / DRV_ERR_TIMEOUT  Bus failure (per HAL mapping).
+ * @param pressure_pa  输出气压，Pa。
+ * @return DRV_OK 成功；DRV_ERR_PARAM pressure_pa 为 NULL；
+ *         DRV_ERR_NOT_INIT 驱动未初始化；
+ *         DRV_ERR_BUS / DRV_ERR_TIMEOUT 总线错误。
  */
 Driver_Status BMP280_ReadPressure(float *pressure_pa);
 
 /**
- * @brief Read the BMP280 ChipID register (0xD0).
+ * @brief 读取 BMP280 ChipID 寄存器（0xD0）。
  *
- * Useful for `Hardware_SelfTest` and debugging. Driver must be
- * initialised first.
+ * 用于 Hardware_SelfTest 和调试，驱动必须已初始化。
  *
- * @param[out] id  Receives the raw ChipID byte.
- *
- * @retval DRV_OK            Success; `*id` updated.
- * @retval DRV_ERR_PARAM     `id` is NULL.
- * @retval DRV_ERR_NOT_INIT  Driver has not been initialised.
- * @retval DRV_ERR_BUS / DRV_ERR_TIMEOUT  Bus failure.
+ * @param id  输出 ChipID 字节。
+ * @return DRV_OK 成功；DRV_ERR_PARAM id 为 NULL；
+ *         DRV_ERR_NOT_INIT 驱动未初始化；
+ *         DRV_ERR_BUS / DRV_ERR_TIMEOUT 总线错误。
  */
 Driver_Status BMP280_GetChipID(uint8_t *id);
 

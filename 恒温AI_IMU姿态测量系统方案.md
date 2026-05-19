@@ -84,6 +84,7 @@ MEMS IMU 在无人机、机器人、机械臂、室内定位和姿态测量系�
 | 温度/气压 | BMP280 | 第一版用于温度反馈或环境参考 |
 | 加热器 | 5V 10Ω 5W 功率电阻 | 给 IMU 模块恒温 |
 | 开关器件 | YJL3400A N-MOSFET | PWM 控制加热电阻 |
+| 参数存储 | W25Q64 (QSPI, 8 MB) | 持久化存储 PID 参数、EKF 初始值等配置，带 CRC32 校验 |
 | 显示模块 | OLED，可选 | 显示温度、姿态、磁场状态和 EKF 模式 |
 | 通信接口 | USB CDC / UART | 上传数据到 Python / MATLAB 上位机 |
 | 上位机 | Python / MATLAB | 数据记录、模型训练、曲线绘制 |
@@ -1161,6 +1162,8 @@ BMP280
 5V 10Ω 5W 电阻加热
 +
 YJL3400A MOSFET PWM 控制
++
+W25Q64 QSPI Flash（参数持久化）
 +
 PID 恒温
 +

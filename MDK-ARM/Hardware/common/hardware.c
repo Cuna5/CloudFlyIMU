@@ -1,16 +1,10 @@
 /**
  * @file    hardware.c
- * @brief   Driver_Layer aggregate implementation.
+ * @brief   驱动层聚合实现。
  *
- * Delivers:
- *   - Task 1.3  — `Driver_MapHalStatus` HAL → `Driver_Status` mapping.
- *   - Task 9.1  — Shared data globals, mutex, and four accessors.
- *   - Task 10.1 — `Hardware_Init`.
- *   - Task 10.2 — `Hardware_SelfTest`.
- *   - Task 11.1 — `Sensor_SampleOnce`.
- *   - Task 11.2 — `Sensor_GetErrorCounters`, `Heater_ApplyDuty`.
- *
- * Spec: .kiro/specs/hardware-base-drivers/{requirements,design,tasks}.md
+ * 包含：Driver_MapHalStatus、共享数据全局变量与互斥锁、
+ * Hardware_Init、Hardware_SelfTest、Sensor_SampleOnce、
+ * Sensor_GetErrorCounters、Heater_ApplyDuty。
  */
 #include "hardware.h"
 
@@ -18,20 +12,11 @@
 
 
 /* ================================================================== */
-/* Driver_MapHalStatus (task 1.3, Requirements 8.4, 8.5)               */
+/* Driver_MapHalStatus                                                 */
 /* ================================================================== */
 
 /**
- * @brief Translate an `HAL_StatusTypeDef` into the Driver_Layer status.
- *
- * Mapping (matches design.md §Error Handling):
- *   - `HAL_OK`       → `DRV_OK`
- *   - `HAL_TIMEOUT`  → `DRV_ERR_TIMEOUT`
- *   - `HAL_ERROR`    → `DRV_ERR_BUS`  (via `default`)
- *   - `HAL_BUSY`     → `DRV_ERR_BUS`  (via `default`)
- *   - any other      → `DRV_ERR_BUS`  (via `default`)
- *
- * Validates: Requirements 8.4, 8.5.
+ * @brief 将 HAL_StatusTypeDef 映射为驱动层返回码。
  */
 Driver_Status Driver_MapHalStatus(HAL_StatusTypeDef hs)
 {
@@ -49,47 +34,23 @@ Driver_Status Driver_MapHalStatus(HAL_StatusTypeDef hs)
 
 
 /* ================================================================== */
-/* Shared data + mutex (task 9.1, Requirements 7.3..7.9)               */
+/* 共享数据 + 互斥锁                                                   */
 /* ================================================================== */
 
-/**
- * @brief Latest raw sensor frame.  Written by `SensorData_Set`, read by
- *        `SensorData_Get`.  Both accessors hold @ref DataMutexHandle.
- *
- * Statically zero-initialised so `_Get` returning before any `_Set`
- * still produces deterministic output (all-zero `SensorData_t`, which
- * upper layers can recognise via `timestamp_ms == 0`).
- */
+/* 最新原始传感器帧，由 SensorData_Set 写入，SensorData_Get 读取。
+ * 静态零初始化，确保调度器启动前读取也有确定性输出（timestamp_ms==0）。 */
 static SensorData_t   g_sensor_data;
 
-/**
- * @brief Latest attitude frame.  Mirrors `g_sensor_data` w.r.t. locking
- *        and zero-init semantics.
- */
+/* 最新姿态帧，加锁和零初始化语义与 g_sensor_data 相同。 */
 static AttitudeData_t g_attitude_data;
 
-/**
- * @brief Mutex protecting the two globals above.
- *
- * Storage is here; declaration is `extern osMutexId_t DataMutexHandle;`
- * in `hardware.h` so other Driver_Layer sub-modules
- * (e.g. `Heater_ApplyDuty`) can take the lock when they need to write
- * back into `g_sensor_data`.
- *
- * Created exactly once by @ref DataMutex_Create which is invoked from
- * `Hardware_Init` (task 10.1).  Until then `DataMutexHandle == NULL`
- * and any pre-init Set/Get call from a running task observes a
- * `DRV_ERR_TIMEOUT` (osMutexAcquire on NULL handle), while pre-scheduler
- * callers fall through to the no-lock fast path — which is exactly the
- * sequence allowed by Requirement 7.8.
- */
+/* 保护上述两个全局变量的互斥锁。
+ * 存储于此，hardware.h 中 extern 声明供其他子模块使用。
+ * 由 DataMutex_Create 在 Hardware_Init 中创建一次。
+ * 加锁顺序：总线互斥锁（SPI/I2C）必须在本锁之前获取。 */
 osMutexId_t DataMutexHandle;
 
-/**
- * @brief Mutex attributes kept in static storage so the underlying
- *        CMSIS-RTOS implementation can hold a long-lived pointer to
- *        the `name` string.
- */
+/* 互斥锁属性，存于静态存储以保证 name 字符串生命周期。 */
 static const osMutexAttr_t s_data_mutex_attr = {
     .name      = "DataMutex",
     .attr_bits = 0u,
@@ -98,21 +59,12 @@ static const osMutexAttr_t s_data_mutex_attr = {
 };
 
 /**
- * @brief Idempotently create @ref DataMutexHandle.
- *
- * Intended to be called by `Hardware_Init` (task 10.1).  Exposed at
- * file scope so the unit test that drives task 9.1 in isolation can
- * also create the mutex without pulling in the full init pipeline.
- *
- * @retval DRV_OK              Mutex created (or already existed).
- * @retval DRV_ERR_NOT_INIT    `osMutexNew` returned NULL.
- *
- * Validates: Requirement 7.7.
+ * @brief 幂等地创建 DataMutexHandle。由 Hardware_Init 调用。
  */
 Driver_Status DataMutex_Create(void)
 {
     if (DataMutexHandle != NULL) {
-        return DRV_OK;          /* idempotent */
+        return DRV_OK;          /* 幂等 */
     }
     DataMutexHandle = osMutexNew(&s_data_mutex_attr);
     if (DataMutexHandle == NULL) {
@@ -123,8 +75,7 @@ Driver_Status DataMutex_Create(void)
 
 
 /* ------------------------------------------------------------------ */
-/* Internal lock helpers — single source of truth for the             */
-/* "scheduler-not-running ⇒ skip mutex" rule (Requirement 7.8).        */
+/* 内部加锁辅助函数——"调度器未运行则跳过互斥锁"规则的唯一实现处。    */
 /* ------------------------------------------------------------------ */
 
 static inline bool data_scheduler_running(void)
@@ -133,13 +84,9 @@ static inline bool data_scheduler_running(void)
 }
 
 /**
- * @brief Acquire @ref DataMutexHandle if the scheduler is running.
+ * @brief 调度器运行时获取 DataMutexHandle。
  *
- * @retval DRV_OK            Lock taken, or scheduler not yet running.
- * @retval DRV_ERR_TIMEOUT   `osMutexAcquire` did not return `osOK`
- *                            within @ref HAL_TIMEOUT_MS (also covers
- *                            the rare case of a NULL handle, which
- *                            CMSIS-RTOS rejects with `osErrorParameter`).
+ * @return DRV_OK 已加锁或调度器未运行；DRV_ERR_TIMEOUT 超时。
  */
 static Driver_Status data_lock(void)
 {
@@ -161,13 +108,11 @@ static void data_unlock(void)
 
 
 /* ------------------------------------------------------------------ */
-/* Public accessors                                                    */
+/* 公共访问器                                                          */
 /* ------------------------------------------------------------------ */
 
 /**
  * @copydoc SensorData_Set
- *
- * Validates: Requirements 7.3, 7.4, 7.8.
  */
 Driver_Status SensorData_Set(const SensorData_t *src)
 {
@@ -185,8 +130,6 @@ Driver_Status SensorData_Set(const SensorData_t *src)
 
 /**
  * @copydoc SensorData_Get
- *
- * Validates: Requirements 7.3, 7.5, 7.8.
  */
 Driver_Status SensorData_Get(SensorData_t *dst)
 {
@@ -204,8 +147,6 @@ Driver_Status SensorData_Get(SensorData_t *dst)
 
 /**
  * @copydoc AttitudeData_Set
- *
- * Validates: Requirements 7.3, 7.6, 7.8.
  */
 Driver_Status AttitudeData_Set(const AttitudeData_t *src)
 {
@@ -223,8 +164,6 @@ Driver_Status AttitudeData_Set(const AttitudeData_t *src)
 
 /**
  * @copydoc AttitudeData_Get
- *
- * Validates: Requirements 7.3, 7.6, 7.8.
  */
 Driver_Status AttitudeData_Get(AttitudeData_t *dst)
 {
@@ -242,74 +181,66 @@ Driver_Status AttitudeData_Get(AttitudeData_t *dst)
 
 
 /* ================================================================== */
-/* Hardware_Init (task 10.1, Requirements 1.3, 1.4, 1.5, 1.6, 7.7)    */
+/* Hardware_Init                                                       */
 /* ================================================================== */
 
 /**
- * @brief Initialise the entire Driver_Layer in a fixed order.
+ * @brief 按固定顺序初始化整个驱动层。
  *
- * Sequence:
- *   1. Create @ref DataMutexHandle via @ref DataMutex_Create.
- *   2. Call each sub-module `*_Init` in order:
- *        Debug_UART → BMP280 → IST8310 → BMI088 → Heater.
- *   3. On the first non-`DRV_OK` return:
- *        - If the failing module is NOT Debug_UART and Debug_UART has
- *          already been initialised (i.e. index > 0), emit an error log
- *          via `Debug_Log_Level(DBG_ERR, ...)` containing the module
- *          name and numeric error code.
- *        - If the failing module IS Debug_UART (index 0), skip logging.
- *        - Return the error code immediately; do NOT call later modules.
- *
- * Validates: Requirements 1.3, 1.4, 1.5, 1.6, 7.7.
+ * 顺序：Debug_UART → BMP280 → IST8310 → BMI088 → Heater → W25Q64。
+ * 遇到第一个非 DRV_OK 的子模块立即返回（W25Q64 失败除外，仅记日志）。
  */
 Driver_Status Hardware_Init(void)
 {
     Driver_Status err;
 
-    /* ---- Step 1: Create the shared-data mutex ---- */
+    /* ---- 步骤 1：创建共享数据互斥锁 ---- */
     err = DataMutex_Create();
     if (err != DRV_OK) {
         return err;
     }
 
-    /* ---- Step 2: Init sub-modules in order ---- */
+    /* ---- 步骤 2：按顺序初始化子模块 ---- */
 
-    /* Module 0: Debug_UART (must be first — other modules depend on it
-     * for error logging). */
+    /* 模块 0：Debug_UART（必须最先初始化，其他模块依赖它输出错误日志） */
     err = DebugUART_Init();
     if (err != DRV_OK) {
-        /* Requirement 1.5: Debug_UART itself failed → skip log output,
-         * return error directly. */
+        /* Debug_UART 本身失败，跳过日志输出，直接返回错误 */
         return err;
     }
 
-    /* Module 1: BMP280 */
+    /* 模块 1：BMP280 */
     err = BMP280_Init();
     if (err != DRV_OK) {
-        /* Requirement 1.6: Debug_UART is up → log the failure. */
         Debug_Log_Level(DBG_ERR, "BMP280 init failed: %d", (int)err);
         return err;
     }
 
-    /* Module 2: IST8310 */
+    /* 模块 2：IST8310 */
     err = IST8310_Init();
     if (err != DRV_OK) {
         Debug_Log_Level(DBG_ERR, "IST8310 init failed: %d", (int)err);
         return err;
     }
 
-    /* Module 3: BMI088 */
+    /* 模块 3：BMI088 */
     err = BMI088_Init();
     if (err != DRV_OK) {
         Debug_Log_Level(DBG_ERR, "BMI088 init failed: %d", (int)err);
         return err;
     }
 
-    /* Module 4: Heater */
+    /* 模块 4：Heater */
     err = Heater_Init();
     if (err != DRV_OK) {
         Debug_Log_Level(DBG_ERR, "Heater init failed: %d", (int)err);
         return err;
+    }
+
+    /* Module 5: W25Q64 QSPI Flash（非关键，失败只记日志，不阻断启动） */
+    err = W25Q64_Init();
+    if (err != DRV_OK) {
+        Debug_Log_Level(DBG_WARN, "W25Q64 init failed: %d (params will use defaults)", (int)err);
     }
 
     return DRV_OK;
@@ -317,7 +248,7 @@ Driver_Status Hardware_Init(void)
 
 
 /* ================================================================== */
-/* Hardware_SelfTest (task 10.2, Requirements 10.1..10.5)              */
+/* Hardware_SelfTest                                                   */
 /* ================================================================== */
 
 Driver_Status Hardware_SelfTest(void)
@@ -325,37 +256,37 @@ Driver_Status Hardware_SelfTest(void)
     Driver_Status result = DRV_OK;
     uint8_t acc_id = 0, gyro_id = 0, ist_id = 0, bmp_id = 0;
 
-    /* BMI088 accelerometer + gyroscope (single HAL call, two IDs). */
+    /* BMI088 加速度计 + 陀螺仪 */
     Driver_Status st = BMI088_GetChipID(&acc_id, &gyro_id);
-    if (st == DRV_OK) {
-        Debug_Log_Level(DBG_INFO, "BMI088_ACC ID=0x%02X OK", acc_id);
+    if (st == DRV_OK && acc_id == 0x1E) {
+        Debug_Log_Level(DBG_INFO, "BMI088_ACC ID=0x%02X OK\r\n", acc_id);
     } else {
-        Debug_Log_Level(DBG_ERR, "BMI088_ACC ID=0x%02X FAIL", acc_id);
+        Debug_Log_Level(DBG_ERR, "BMI088_ACC ID=0x%02X FAIL\r\n", acc_id);
         result = DRV_ERR_ID;
     }
 
-    if (gyro_id == 0x0F) {
-        Debug_Log_Level(DBG_INFO, "BMI088_GYRO ID=0x%02X OK", gyro_id);
+    if (st == DRV_OK && gyro_id == 0x0F) {
+        Debug_Log_Level(DBG_INFO, "BMI088_GYRO ID=0x%02X OK\r\n", gyro_id);
     } else {
-        Debug_Log_Level(DBG_ERR, "BMI088_GYRO ID=0x%02X FAIL", gyro_id);
+        Debug_Log_Level(DBG_ERR, "BMI088_GYRO ID=0x%02X FAIL\r\n", gyro_id);
         result = DRV_ERR_ID;
     }
 
     /* IST8310 */
     st = IST8310_GetChipID(&ist_id);
-    if (st == DRV_OK) {
-        Debug_Log_Level(DBG_INFO, "IST8310 ID=0x%02X OK", ist_id);
+    if (st == DRV_OK && ist_id == 0x10) {
+        Debug_Log_Level(DBG_INFO, "IST8310 ID=0x%02X OK\r\n", ist_id);
     } else {
-        Debug_Log_Level(DBG_ERR, "IST8310 ID=0x%02X FAIL", ist_id);
+        Debug_Log_Level(DBG_ERR, "IST8310 ID=0x%02X FAIL\r\n", ist_id);
         result = DRV_ERR_ID;
     }
 
     /* BMP280 */
     st = BMP280_GetChipID(&bmp_id);
-    if (st == DRV_OK) {
-        Debug_Log_Level(DBG_INFO, "BMP280 ID=0x%02X OK", bmp_id);
+    if (st == DRV_OK && bmp_id == 0x58) {
+        Debug_Log_Level(DBG_INFO, "BMP280 ID=0x%02X OK\r\n", bmp_id);
     } else {
-        Debug_Log_Level(DBG_ERR, "BMP280 ID=0x%02X FAIL", bmp_id);
+        Debug_Log_Level(DBG_ERR, "BMP280 ID=0x%02X FAIL\r\n", bmp_id);
         result = DRV_ERR_ID;
     }
 
@@ -364,14 +295,14 @@ Driver_Status Hardware_SelfTest(void)
 
 
 /* ================================================================== */
-/* Sensor_SampleOnce (task 11.1, Requirements 9.1, 9.2)               */
+/* Sensor_SampleOnce                                                   */
 /* ================================================================== */
 
-/* Throttle divisors: 1 kHz call rate → 50 Hz mag, 10 Hz baro. */
+/* 节流计数器：假设 1 kHz 调用频率 → 磁力计约 50 Hz，气压计约 10 Hz */
 static uint32_t s_mag_div = 0u;
 static uint32_t s_bar_div = 0u;
 
-/* Per-sensor error counters (exposed via Sensor_GetErrorCounters). */
+/* 各传感器累计错误计数（通过 Sensor_GetErrorCounters 暴露） */
 static uint32_t s_err_bmi = 0u;
 static uint32_t s_err_ist = 0u;
 static uint32_t s_err_bmp = 0u;
@@ -384,7 +315,7 @@ Driver_Status Sensor_SampleOnce(SensorData_t *out)
 
     Driver_Status first_err = DRV_OK;
 
-    /* BMI088 (every call) */
+    /* BMI088（每次调用） */
     Driver_Status st = BMI088_ReadAccel(&out->ax, &out->ay, &out->az);
     if (st != DRV_OK) {
         s_err_bmi++;
@@ -397,7 +328,7 @@ Driver_Status Sensor_SampleOnce(SensorData_t *out)
         if (first_err == DRV_OK) first_err = st;
     }
 
-    /* IST8310 (every 20th call → ~50 Hz) */
+    /* IST8310（每 20 次调用约 50 Hz） */
     s_mag_div++;
     if (s_mag_div >= 20u) {
         s_mag_div = 0u;
@@ -408,7 +339,7 @@ Driver_Status Sensor_SampleOnce(SensorData_t *out)
         }
     }
 
-    /* BMP280 (every 100th call → ~10 Hz) */
+    /* BMP280（每 100 次调用约 10 Hz） */
     s_bar_div++;
     if (s_bar_div >= 100u) {
         s_bar_div = 0u;
@@ -425,7 +356,7 @@ Driver_Status Sensor_SampleOnce(SensorData_t *out)
 
 
 /* ================================================================== */
-/* Sensor_GetErrorCounters (task 11.2, Requirement 9.3)               */
+/* Sensor_GetErrorCounters                                             */
 /* ================================================================== */
 
 void Sensor_GetErrorCounters(uint32_t *bmi, uint32_t *ist, uint32_t *bmp)
@@ -437,18 +368,18 @@ void Sensor_GetErrorCounters(uint32_t *bmi, uint32_t *ist, uint32_t *bmp)
 
 
 /* ================================================================== */
-/* Heater_ApplyDuty (task 11.2, Requirements 9.4, 9.5)                */
+/* Heater_ApplyDuty                                                    */
 /* ================================================================== */
 
 Driver_Status Heater_ApplyDuty(float duty)
 {
-    /* Set PWM first (no data lock held — lock order: bus lock → data lock). */
+    /* 先设置 PWM（不持有数据锁——加锁顺序：总线锁 → 数据锁） */
     Driver_Status st = Heater_SetDuty(duty);
     if (st != DRV_OK) {
         return st;
     }
 
-    /* Clamp and write back into g_sensor_data under DataMutexHandle. */
+    /* 夹紧后在 DataMutexHandle 保护下写回 g_sensor_data */
     float clamped = duty;
     if (clamped < 0.0f) clamped = 0.0f;
     else if (clamped > 1.0f) clamped = 1.0f;

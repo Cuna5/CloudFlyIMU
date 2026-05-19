@@ -1,14 +1,9 @@
 /**
  * @file    ist8310.h
- * @brief   IST8310 magnetometer driver (I2C1, 7-bit address 0x0E).
+ * @brief   IST8310 磁力计驱动（I2C1，7-bit 地址 0x0E）公共 API。
  *
- * Public API delivered by task 4.1. This header is intentionally part of
- * the aggregate facade (`common/hardware.h`): the aggregate header defines
- * @ref Driver_Status and then `#include`s this file, so we do not pull in
- * `hardware.h` here to avoid a circular include. Implementation lives in
- * `ist8310/ist8310.c`.
- *
- * Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 8.6.
+ * 本头文件通过 common/hardware.h 聚合导出，应用层不应直接包含本文件。
+ * 实现位于 ist8310/ist8310.c。
  */
 #ifndef IST8310_H
 #define IST8310_H
@@ -19,59 +14,50 @@ extern "C" {
 
 #include <stdint.h>
 
-/* Driver_Status is provided transitively by `common/hardware.h`, which
- * includes this header last. Compiling ist8310.c directly should therefore
- * include `hardware.h` first to make Driver_Status visible. */
+/* Driver_Status 由 common/hardware.h 传递定义，
+ * ist8310.c 中通过先包含 hardware.h 使该类型可见。 */
 
 /**
- * @brief Initialise the IST8310 over I2C1.
+ * @brief 通过 I2C1 初始化 IST8310。
  *
- * Steps (under @c I2CMutexHandle when the scheduler is running):
- *   1. Read WAI (`0x00`) and verify it equals `0x10` (Chip ID).
- *   2. Write CTRL2 (`0x0B`) ← `0xC0` to enable DRDY + interrupt.
- *   3. Write AVG_CTRL (`0x41`) ← `0x09` (X/Y/Z average configuration).
- *   4. Write PD_CTRL (`0x42`) ← `0xC0` (pulse duration / performance).
- *   5. Mark module as initialised.
+ * 步骤（调度器运行时在 I2CMutexHandle 保护下执行）：
+ *   1. 读 WAI（0x00），验证等于 0x10（Chip ID）。
+ *   2. 写 CTRL2（0x0B）← 0xC0，使能 DRDY + 中断。
+ *   3. 写 AVG_CTRL（0x41）← 0x09（X/Y/Z 平均配置）。
+ *   4. 写 PD_CTRL（0x42）← 0xC0（脉冲宽度/性能配置）。
+ *   5. 标记模块已初始化。
  *
- * @retval DRV_OK            on success.
- * @retval DRV_ERR_ID        Chip ID mismatch.
- * @retval DRV_ERR_BUS       HAL returned `HAL_ERROR` / `HAL_BUSY` / other.
- * @retval DRV_ERR_TIMEOUT   HAL timeout, or mutex acquire timeout.
+ * @return DRV_OK 成功；DRV_ERR_ID Chip ID 不匹配；
+ *         DRV_ERR_BUS HAL 返回 HAL_ERROR/HAL_BUSY；
+ *         DRV_ERR_TIMEOUT HAL 或互斥锁超时。
  */
 Driver_Status IST8310_Init(void);
 
 /**
- * @brief Trigger one single-shot measurement and read X/Y/Z magnetic field.
+ * @brief 触发一次单次测量并读取 X/Y/Z 磁场数据。
  *
- * Sequence (under @c I2CMutexHandle when the scheduler is running):
- *   1. Write CTRL1 (`0x0A`) ← `0x01` to start a single conversion.
- *   2. Wait at least 6 ms (`osDelay(6)` if scheduler is running, else
- *      `HAL_Delay(6)`).
- *   3. Burst read 6 bytes from `0x03..0x08` (XL, XH, YL, YH, ZL, ZH).
- *   4. Reconstruct little-endian `int16_t` and scale by `0.3 µT/LSB`.
+ * 步骤（调度器运行时在 I2CMutexHandle 保护下执行）：
+ *   1. 写 CTRL1（0x0A）← 0x01，启动单次转换。
+ *   2. 等待至少 6 ms（调度器运行时用 osDelay，否则用 HAL_Delay）。
+ *   3. 从 0x03..0x08 突发读取 6 字节（XL, XH, YL, YH, ZL, ZH）。
+ *   4. 按小端 int16_t 重建三轴原始值，乘以 0.3 µT/LSB 转换为物理量。
  *
- * @param mx Output X magnetic field, microtesla. Must not be NULL.
- * @param my Output Y magnetic field, microtesla. Must not be NULL.
- * @param mz Output Z magnetic field, microtesla. Must not be NULL.
- *
- * @retval DRV_OK            on success.
- * @retval DRV_ERR_PARAM     any output pointer is NULL.
- * @retval DRV_ERR_NOT_INIT  module has not been initialised.
- * @retval DRV_ERR_BUS       HAL returned `HAL_ERROR` / `HAL_BUSY` / other.
- * @retval DRV_ERR_TIMEOUT   HAL timeout, or mutex acquire timeout.
+ * @param mx  输出 X 轴磁场，微特斯拉，不得为 NULL。
+ * @param my  输出 Y 轴磁场，微特斯拉，不得为 NULL。
+ * @param mz  输出 Z 轴磁场，微特斯拉，不得为 NULL。
+ * @return DRV_OK 成功；DRV_ERR_PARAM 任意输出指针为 NULL；
+ *         DRV_ERR_NOT_INIT 模块未初始化；
+ *         DRV_ERR_BUS / DRV_ERR_TIMEOUT 总线错误。
  */
 Driver_Status IST8310_ReadMag(float *mx, float *my, float *mz);
 
 /**
- * @brief Read the IST8310 Chip ID register (`0x00`).
+ * @brief 读取 IST8310 Chip ID 寄存器（0x00）。
  *
- * @param id Output Chip ID byte. Must not be NULL.
- *
- * @retval DRV_OK            on success.
- * @retval DRV_ERR_PARAM     `id` is NULL.
- * @retval DRV_ERR_NOT_INIT  module has not been initialised.
- * @retval DRV_ERR_BUS       HAL returned `HAL_ERROR` / `HAL_BUSY` / other.
- * @retval DRV_ERR_TIMEOUT   HAL timeout, or mutex acquire timeout.
+ * @param id  输出 Chip ID 字节，不得为 NULL。
+ * @return DRV_OK 成功；DRV_ERR_PARAM id 为 NULL；
+ *         DRV_ERR_NOT_INIT 模块未初始化；
+ *         DRV_ERR_BUS / DRV_ERR_TIMEOUT 总线错误。
  */
 Driver_Status IST8310_GetChipID(uint8_t *id);
 

@@ -21,11 +21,13 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "main.h"
+#include "FreeRTOS.h"
 #include "cmsis_os2.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "hardware.h"
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,7 +40,37 @@
 #define SENSOR_TASK_PERIOD_MS          1U
 #define SENSOR_PRESSURE_DIV            100U
 #define HEAT_TASK_PERIOD_MS            100U
+#define FUSION_TASK_PERIOD_MS          1U
 #define DEBUG_TASK_PERIOD_MS           1000U
+
+/* Mahony 增益，可通过宏覆盖 */
+#ifndef MAHONY_KP
+#define MAHONY_KP   2.0f
+#endif
+#ifndef MAHONY_KI
+#define MAHONY_KI   0.005f
+#endif
+
+/* 磁场可靠性判断阈值（微特斯拉） */
+#ifndef MAG_NORM_MIN
+#define MAG_NORM_MIN   20.0f
+#endif
+#ifndef MAG_NORM_MAX
+#define MAG_NORM_MAX   80.0f
+#endif
+
+#ifndef HEAT_TARGET_C
+#define HEAT_TARGET_C   40.0f
+#endif
+#ifndef HEAT_PID_KP
+#define HEAT_PID_KP     5.0f
+#endif
+#ifndef HEAT_PID_KI
+#define HEAT_PID_KI     0.1f
+#endif
+#ifndef HEAT_PID_KD
+#define HEAT_PID_KD     0.5f
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -257,6 +289,33 @@ void StartTask03(void *argument)
   /* USER CODE BEGIN StartTask03 */
   (void)argument;
 
+  /* 从 Flash 加载 PID 参数；失败时写入编译期默认值到 Flash */
+  AppParams_t params = {
+      .heat_kp       = HEAT_PID_KP,
+      .heat_ki       = HEAT_PID_KI,
+      .heat_kd       = HEAT_PID_KD,
+      .heat_target_c = HEAT_TARGET_C,
+  };
+  Driver_Status load_st = Params_Load(&params);
+  if (load_st != DRV_OK)
+  {
+    Debug_Log_Level(DBG_WARN, "Params_Load err=%d, saving defaults", (int)load_st);
+    (void)Params_Save(&params);
+  }
+  else
+  {
+    Debug_Log_Level(DBG_INFO, "Params loaded: kp=%ld ki=%ld kd=%ld target_mC=%ld",
+                    (long)App_FloatToMilli(params.heat_kp),
+                    (long)App_FloatToMilli(params.heat_ki),
+                    (long)App_FloatToMilli(params.heat_kd),
+                    (long)App_FloatToMilli(params.heat_target_c));
+  }
+
+  PID_t heat_pid;
+  PID_Init(&heat_pid, params.heat_kp, params.heat_ki, params.heat_kd,
+           1.0f, 0.0f, 1.0f);
+  float heat_target = params.heat_target_c;
+
   uint32_t last_bmp_errors = 0U;
   bool overheat_logged = false;
 
@@ -272,6 +331,7 @@ void StartTask03(void *argument)
         if (!overheat_logged)
         {
           overheat_logged = true;
+          PID_Reset(&heat_pid);
           Debug_Log_Level(DBG_ERR, "Heater overheat temp_mC=%ld",
                           (long)App_FloatToMilli(snap.temperature));
         }
@@ -279,6 +339,10 @@ void StartTask03(void *argument)
       else if (heat_st == DRV_OK)
       {
         overheat_logged = false;
+        const float dt = HEAT_TASK_PERIOD_MS / 1000.0f;
+        const float duty = PID_Update(&heat_pid, heat_target,
+                                      snap.temperature, dt);
+        (void)Heater_ApplyDuty(duty);
       }
     }
 
@@ -287,6 +351,7 @@ void StartTask03(void *argument)
     if (bmp_errors != last_bmp_errors)
     {
       last_bmp_errors = bmp_errors;
+      PID_Reset(&heat_pid);
       (void)Heater_EmergencyStop();
       Debug_Log_Level(DBG_ERR, "BMP280 read fault, heater stopped");
     }
@@ -308,10 +373,43 @@ void StartTask04(void *argument)
   /* USER CODE BEGIN StartTask04 */
   (void)argument;
 
+  Mahony_t mahony;
+  Mahony_Init(&mahony, MAHONY_KP, MAHONY_KI);
+
+  const float dt = FUSION_TASK_PERIOD_MS / 1000.0f;
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    SensorData_t s;
+    if (SensorData_Get(&s) == DRV_OK)
+    {
+      /* 磁场模长可靠性判断 */
+      float mag_norm = sqrtf(s.mx*s.mx + s.my*s.my + s.mz*s.mz);
+      float mag_rel = 0.0f;
+      if (mag_norm >= MAG_NORM_MIN && mag_norm <= MAG_NORM_MAX)
+      {
+        /* 线性映射到 [0,1]，中心点最高 */
+        float center = (MAG_NORM_MIN + MAG_NORM_MAX) * 0.5f;
+        float half   = (MAG_NORM_MAX - MAG_NORM_MIN) * 0.5f;
+        mag_rel = 1.0f - fabsf(mag_norm - center) / half;
+      }
+
+      Mahony_Update(&mahony,
+                    s.gx, s.gy, s.gz,
+                    s.ax, s.ay, s.az,
+                    s.mx, s.my, s.mz,
+                    mag_rel, dt);
+
+      AttitudeData_t att = {0};
+      att.timestamp_ms   = s.timestamp_ms;
+      att.mag_reliability = mag_rel;
+      att.ekf_mode        = (mag_rel > 0.1f) ? 2U : 1U;  /* 2=9轴, 1=6轴 */
+      Mahony_GetEuler(&mahony, &att.roll, &att.pitch, &att.yaw);
+      (void)AttitudeData_Set(&att);
+    }
+
+    osDelay(FUSION_TASK_PERIOD_MS);
   }
   /* USER CODE END StartTask04 */
 }
@@ -360,6 +458,18 @@ void StartTask05(void *argument)
                       (unsigned long)bmi_errors,
                       (unsigned long)ist_errors,
                       (unsigned long)bmp_errors);
+    }
+
+    AttitudeData_t att;
+    if (AttitudeData_Get(&att) == DRV_OK)
+    {
+      Debug_Log_Level(DBG_INFO,
+                      "RPY_milli=%ld,%ld,%ld MagRel_permille=%ld Mode=%u",
+                      (long)App_FloatToMilli(att.roll),
+                      (long)App_FloatToMilli(att.pitch),
+                      (long)App_FloatToMilli(att.yaw),
+                      (long)App_FloatToMilli(att.mag_reliability),
+                      (unsigned)att.ekf_mode);
     }
 
     osDelay(DEBUG_TASK_PERIOD_MS);

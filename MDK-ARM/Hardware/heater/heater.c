@@ -1,60 +1,57 @@
 /**
  * @file    heater.c
- * @brief   Heater PWM driver (TIM3_CH1, PC6) implementation.
+ * @brief   加热 PWM 驱动（TIM3_CH1，PC6）实现。
  *
- * Implements Requirement 5 of the @c hardware-base-drivers spec:
- *   - PWM start-up and frequency self-correction to ~1 Hz.
- *   - Duty-cycle clamping to [0, 1] with comparator update.
- *   - Emergency-stop / fault-latch state machine.
- *   - Over-temperature trip threshold.
+ * - PWM 启动及频率自动修正为约 1 Hz。
+ * - 占空比夹紧到 [0, 1] 并更新比较器。
+ * - 急停/故障锁存状态机。
+ * - 过温保护阈值检查。
  *
- * The driver intentionally keeps zero dependencies on FreeRTOS — the timer
- * register accesses are atomic enough that no mutex is required, and
- * @c Heater_ApplyDuty (in @c common/hardware.c) is the entry point that
- * couples this module to the shared @c SensorData_t mutex.
+ * 本驱动不依赖 FreeRTOS——定时器寄存器访问足够原子，无需互斥锁。
+ * Heater_ApplyDuty（位于 common/hardware.c）负责与 SensorData_t 互斥锁的耦合。
  */
 #include "hardware.h"
 #include "tim.h"
 
 /* ================================================================== */
-/* Module-private state                                                */
+/* 模块私有状态                                                        */
 /* ================================================================== */
 
-/** True after @c Heater_Init has completed successfully. */
+/** Heater_Init 成功完成后置 true。 */
 static bool  s_initialized   = false;
 
-/** Latched-fault flag.  Set by @c Heater_EmergencyStop and
- *  @c Heater_OverheatCheck; cleared only by @c Heater_ClearFault. */
+/** 故障锁存标志。由 Heater_EmergencyStop 和 Heater_OverheatCheck 置位，
+ *  仅由 Heater_ClearFault 清除。 */
 static bool  s_fault_latched = false;
 
-/** Most recent duty value applied to TIM3_CH1's CCR register. */
+/** 最近一次应用到 TIM3_CH1 CCR 寄存器的占空比。 */
 static float s_current_duty  = 0.0f;
 
 /* ================================================================== */
-/* Constants for the 1 Hz frequency self-correction step (Req 5.2)     */
+/* 1 Hz 频率自动修正常量                                               */
 /* ================================================================== */
 
-/** APB1 timer kernel clock (240 MHz on STM32H743 with default RCC). */
+/** APB1 定时器内核时钟（STM32H743 默认 RCC 配置下为 240 MHz）。 */
 #define HEATER_TIM3_CLOCK_HZ    240000000.0f
 
-/** Acceptable PWM frequency band [0.9, 1.1] Hz. */
+/** 可接受的 PWM 频率范围 [0.9, 1.1] Hz。 */
 #define HEATER_FREQ_LO_HZ       0.9f
 #define HEATER_FREQ_HI_HZ       1.1f
 
-/** Forced 1 Hz configuration: 24000 * 10000 = 2.4e8 ticks per period. */
+/** 强制 1 Hz 配置：24000 * 10000 = 2.4e8 个时钟周期。 */
 #define HEATER_FORCE_PSC        (24000U - 1U)
 #define HEATER_FORCE_ARR        (10000U - 1U)
 
 /* ================================================================== */
-/* Helpers                                                              */
+/* 内部辅助函数                                                        */
 /* ================================================================== */
 
 /**
- * @brief Clamp @p duty into [0, 1].  NaN inputs are reported via @p out_nan.
+ * @brief 将 duty 夹紧到 [0, 1]。NaN 输入通过 out_nan 报告。
  */
 static float heater_clamp_duty(float duty, bool *out_nan)
 {
-    /* IEEE-754: NaN compares unequal to itself. */
+    /* IEEE-754：NaN 与自身不相等 */
     if (duty != duty) {
         if (out_nan) *out_nan = true;
         return 0.0f;
@@ -71,9 +68,8 @@ static float heater_clamp_duty(float duty, bool *out_nan)
 }
 
 /**
- * @brief Internal version of EmergencyStop that skips the @c s_initialized
- *        guard.  Used from @c Heater_OverheatCheck after the public guard
- *        has already passed, so we don't return a misleading status.
+ * @brief EmergencyStop 的内部版本，跳过 s_initialized 检查。
+ * 由 Heater_OverheatCheck 在公共检查通过后调用，避免返回误导性状态。
  */
 static void heater_emergency_stop_locked(void)
 {
@@ -83,18 +79,16 @@ static void heater_emergency_stop_locked(void)
 }
 
 /* ================================================================== */
-/* Public API                                                          */
+/* 公共 API                                                            */
 /* ================================================================== */
 
 Driver_Status Heater_Init(void)
 {
-    /* --- 1. Frequency self-correction (Requirement 5.2) ----------------- */
+    /* --- 1. 频率自动修正 -------------------------------------------- */
     const uint32_t psc_plus_1 = htim3.Init.Prescaler + 1U;
     const uint32_t arr_plus_1 = htim3.Init.Period    + 1U;
 
-    /* Defensive: a degenerate (PSC, ARR) of (0, 0) would mean +1=1 each, so
-     * f = 240 MHz, way out of band — handled by the if-check below.  We
-     * still guard against literal zero-overflow products just in case. */
+    /* 防御性检查：(PSC, ARR) = (0, 0) 时 f = 240 MHz，远超范围，由下方 if 处理 */
     bool needs_force = false;
     if (psc_plus_1 == 0U || arr_plus_1 == 0U) {
         needs_force = true;
@@ -109,25 +103,22 @@ Driver_Status Heater_Init(void)
     if (needs_force) {
         __HAL_TIM_SET_PRESCALER (&htim3, HEATER_FORCE_PSC);
         __HAL_TIM_SET_AUTORELOAD(&htim3, HEATER_FORCE_ARR);
-        /* The HAL macros write the registers; on host the shim mirrors them
-         * into @c htim3.Init.{Prescaler,Period}.  Be defensive and keep the
-         * cached @c Init fields in sync for the on-target case as well — the
-         * later @c Heater_SetDuty math reads them directly. */
+        /* HAL 宏写入寄存器；同步更新 Init 缓存字段，供 Heater_SetDuty 读取 */
         htim3.Init.Prescaler = HEATER_FORCE_PSC;
         htim3.Init.Period    = HEATER_FORCE_ARR;
     }
 
-    /* --- 2. Reset duty to 0 before enabling the output ------------------ */
+    /* --- 2. 使能输出前将占空比重置为 0 -------------------------------- */
     s_current_duty = 0.0f;
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0u);
 
-    /* --- 3. Start PWM --------------------------------------------------- */
+    /* --- 3. 启动 PWM -------------------------------------------------- */
     HAL_StatusTypeDef hs = HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
     if (hs != HAL_OK) {
         return Driver_MapHalStatus(hs);
     }
 
-    /* --- 4. Mark ready -------------------------------------------------- */
+    /* --- 4. 标记就绪 -------------------------------------------------- */
     s_fault_latched = false;
     s_initialized   = true;
     return DRV_OK;
@@ -138,7 +129,7 @@ Driver_Status Heater_SetDuty(float duty)
     if (!s_initialized) {
         return DRV_ERR_NOT_INIT;
     }
-    /* Fault-latched path: never touch the comparator (Requirement 5.7). */
+    /* 故障锁存时拒绝操作，不写比较器 */
     if (s_fault_latched) {
         return DRV_ERR_NOT_INIT;
     }
@@ -149,8 +140,7 @@ Driver_Status Heater_SetDuty(float duty)
         return DRV_ERR_PARAM;
     }
 
-    /* CCR = duty * (ARR + 1).  ARR + 1 = number of timer ticks per period;
-     * a clamped duty of 1 maps to (ARR+1), giving a full-on output. */
+    /* CCR = duty * (ARR + 1)；duty=1 时 CCR=ARR+1，输出全开 */
     const uint32_t ccr = (uint32_t)(clamped * (float)(htim3.Init.Period + 1U));
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, ccr);
     s_current_duty = clamped;
@@ -201,8 +191,7 @@ Driver_Status Heater_OverheatCheck(float temperature_c)
 
 bool Heater_IsFaultLatched(void)
 {
-    /* Read-only; safe to query before init (returns false because the static
-     * s_fault_latched is zero-initialised). */
+    /* 只读访问；Init 前查询安全（静态变量零初始化，返回 false） */
     if (!s_initialized) {
         return false;
     }
