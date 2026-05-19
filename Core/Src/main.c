@@ -21,6 +21,7 @@
 #include "FreeRTOS.h"
 #include "cmsis_os2.h"
 #include "i2c.h"
+#include "quadspi.h"
 #include "spi.h"
 #include "tim.h"
 #include "usart.h"
@@ -29,7 +30,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "hardware.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -102,8 +103,16 @@ int main(void)
   MX_SPI1_Init();
   MX_TIM3_Init();
   MX_USART1_UART_Init();
+  MX_QUADSPI_Init();
   /* USER CODE BEGIN 2 */
-
+  {
+    Driver_Status hw_st = Hardware_Init();
+    if (hw_st != DRV_OK) {
+      /* Hardware_Init already logged the failing module via Debug_Log_Level.
+       * Spin here so a debugger can inspect hw_st before the RTOS starts. */
+      Error_Handler();
+    }
+  }
   /* USER CODE END 2 */
 
   /* Init scheduler */
