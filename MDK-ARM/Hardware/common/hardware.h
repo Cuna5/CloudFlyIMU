@@ -165,8 +165,9 @@ Driver_Status DataMutex_Create(void);
 /**
  * @brief 按固定顺序初始化整个驱动层。
  *
- * 顺序：Debug_UART → BMP280 → IST8310 → BMI088 → Heater → W25Q64。
- * 遇到第一个非 DRV_OK 的子模块立即返回（W25Q64 失败除外，仅记日志）。
+ * Order: Debug_UART -> BMP280 -> IST8310 -> BMI088 -> Heater -> SDStorage.
+ * The first critical module error is returned. SDStorage is optional at boot
+ * and only logs a warning when unavailable.
  * 同时通过 osMutexNew 创建 DataMutexHandle。
  */
 Driver_Status Hardware_Init(void);
@@ -248,13 +249,14 @@ Driver_Status Heater_ApplyDuty(float duty);
 /*                                                                      */
 /* 放在最后，使各子模块头文件可以使用上方定义的共享类型和宏。          */
 /* ================================================================== */
+#include "led.h"
 #include "debug_uart.h"
 #include "bmp280.h"
 #include "ist8310.h"
 #include "bmi088.h"
 #include "heater.h"
 #include "pid.h"
-#include "w25q64.h"
+#include "sd_storage.h"
 #include "mahony.h"
 #include "ekf.h"
 

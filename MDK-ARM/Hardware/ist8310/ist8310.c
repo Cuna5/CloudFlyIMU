@@ -30,28 +30,30 @@ extern osMutexId_t I2CMutexHandle;
 /* ------------------------------------------------------------------ */
 
 /** 7-bit 从机地址（数据手册 §7.1，CAD0/CAD1 接地）。 */
-#define IST8310_I2C_ADDR_7BIT       0x0Eu
+#define IST8310_I2C_ADDR_7BIT       0x0Cu
 
 /** HAL_I2C_* 调用需要左移一位的地址（R/W 标志位）。 */
-#define IST8310_I2C_ADDR_HAL        ((uint16_t)(IST8310_I2C_ADDR_7BIT << 1))   /* 0x1C */
+#define IST8310_I2C_ADDR_HAL        ((uint16_t)(IST8310_I2C_ADDR_7BIT << 1))   /* 0x18 */
 
-/** 期望的 Chip ID（WAI）值——数据手册 §8.1。 */
-#define IST8310_CHIP_ID             0x10u
+/** 期望的 Chip ID（WAI）值。 */
+#define IST8310_CHIP_ID             0xFFu
 
-/* 寄存器映射——仅列出本驱动使用的地址 */
-#define IST8310_REG_WAI             0x00u   /* Who-Am-I（Chip ID） */
-#define IST8310_REG_DATA_X_L        0x03u   /* 6 字节突发读取数据起始地址 */
-#define IST8310_REG_CTRL1           0x0Au   /* 控制寄存器 1——写 0x01 启动单次测量 */
-#define IST8310_REG_CTRL2           0x0Bu   /* 控制寄存器 2——DRDY/中断使能 */
-#define IST8310_REG_AVG_CTRL        0x41u   /* 平均控制 */
-#define IST8310_REG_PD_CTRL         0x42u   /* 脉冲宽度/性能控制 */
+/* 寄存器映射 */
+#define IST8310_REG_WAI             0x00u
+#define IST8310_REG_STAT1           0x02u
+#define IST8310_REG_DATA_X_L        0x03u
+#define IST8310_REG_CTRL1           0x0Au
+#define IST8310_REG_CTRL2           0x0Bu
+#define IST8310_REG_AVG_CTRL        0x41u
+#define IST8310_REG_PD_CTRL         0x42u
 
-/* 初始化和读取时使用的控制值 */
-#define IST8310_CTRL2_INIT_VALUE    0xC0u
+#define IST8310_STAT1_DRDY          0x01u
+#define IST8310_SOFT_RESET          0x01u
 #define IST8310_AVG_INIT_VALUE      0x09u
-#define IST8310_PD_INIT_VALUE       0xC0u
+#define IST8310_PD_INIT_VALUE       0xC0u   /* 数据手册推荐值 */
 #define IST8310_CTRL1_SINGLE_MEAS   0x01u
 
+#define IST8310_SOFT_RESET_DELAY_MS 10u
 /** 单次测量稳定时间（数据手册 §6.1，典型值 6 ms）。 */
 #define IST8310_MEAS_DELAY_MS       6u
 
@@ -126,12 +128,32 @@ static Driver_Status ist8310_write_reg(uint8_t reg, uint8_t value)
 }
 
 /** 调度器感知延时，用于触发和突发读取之间的等待。 */
+#if defined(DWT) && defined(CoreDebug) && \
+    defined(CoreDebug_DEMCR_TRCENA_Msk) && defined(DWT_CTRL_CYCCNTENA_Msk)
+static void ist8310_busy_delay_ms(uint32_t ms)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    uint32_t cycles_per_ms = SystemCoreClock / 1000u;
+    if (cycles_per_ms == 0u) cycles_per_ms = 1u;
+    while (ms-- > 0u) {
+        uint32_t start = DWT->CYCCNT;
+        while ((uint32_t)(DWT->CYCCNT - start) < cycles_per_ms) { __NOP(); }
+    }
+}
+#define IST8310_HAS_DWT_DELAY 1
+#endif
+
 static void ist8310_delay_ms(uint32_t ms)
 {
     if (ist8310_scheduler_running()) {
         (void)osDelay(ms);
     } else {
+#if defined(IST8310_HAS_DWT_DELAY)
+        ist8310_busy_delay_ms(ms);
+#else
         HAL_Delay(ms);
+#endif
     }
 }
 
@@ -157,11 +179,12 @@ Driver_Status IST8310_Init(void)
         return DRV_ERR_ID;
     }
 
-    st = ist8310_write_reg(IST8310_REG_CTRL2, IST8310_CTRL2_INIT_VALUE);
+    st = ist8310_write_reg(IST8310_REG_CTRL2, IST8310_SOFT_RESET);
     if (st != DRV_OK) {
         ist8310_bus_unlock();
         return st;
     }
+    ist8310_delay_ms(IST8310_SOFT_RESET_DELAY_MS);
 
     st = ist8310_write_reg(IST8310_REG_AVG_CTRL, IST8310_AVG_INIT_VALUE);
     if (st != DRV_OK) {

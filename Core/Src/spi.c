@@ -98,18 +98,12 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* spiHandle)
     PA6     ------> SPI1_MISO
     PA7     ------> SPI1_MOSI
     */
-    GPIO_InitStruct.Pin = BMI_SCK_Pin;
+    GPIO_InitStruct.Pin = BMI_SCK_Pin|BMI_MISO_Pin|BMI_MOSI_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF5_SPI1;
-    HAL_GPIO_Init(BMI_SCK_GPIO_Port, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = BMI_MISO_Pin;
-    HAL_GPIO_Init(BMI_MISO_GPIO_Port, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = BMI_MOSI_Pin;
-    HAL_GPIO_Init(BMI_MOSI_GPIO_Port, &GPIO_InitStruct);
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN SPI1_MspInit 1 */
 
@@ -133,11 +127,7 @@ void HAL_SPI_MspDeInit(SPI_HandleTypeDef* spiHandle)
     PA6     ------> SPI1_MISO
     PA7     ------> SPI1_MOSI
     */
-    HAL_GPIO_DeInit(BMI_SCK_GPIO_Port, BMI_SCK_Pin);
-
-    HAL_GPIO_DeInit(BMI_MISO_GPIO_Port, BMI_MISO_Pin);
-
-    HAL_GPIO_DeInit(BMI_MOSI_GPIO_Port, BMI_MOSI_Pin);
+    HAL_GPIO_DeInit(GPIOA, BMI_SCK_Pin|BMI_MISO_Pin|BMI_MOSI_Pin);
 
   /* USER CODE BEGIN SPI1_MspDeInit 1 */
 

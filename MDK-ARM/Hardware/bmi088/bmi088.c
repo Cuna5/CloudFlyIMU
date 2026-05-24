@@ -55,12 +55,17 @@ extern osMutexId_t SPIMutexHandle;
 #define BMI_ACC_CHIP_ID             0x1Eu
 #define BMI_GYRO_CHIP_ID            0x0Fu
 
+#define BMI_ACC_REG_PWR_CONF        0x7Cu
+#define BMI_ACC_PWR_CONF_ACTIVE     0x00u
+#define BMI_ACC_PWR_CTRL_ENABLE     0x04u
+#define BMI_ACC_PWR_CTRL_DELAY_MS   5u
+#define BMI_ACC_POWER_UP_DELAY_MS   50u
+
 /* 初始化时使用的寄存器值 */
 #define BMI_ACC_SOFTRESET_VALUE     0xB6u   /* 与 BMP280 软复位值相同 */
 #define BMI_ACC_RANGE_6G            0x01u   /* ±6 g                                       */
-#define BMI_ACC_CONF_OSR4_800HZ     0xABu   /* OSR4，ODR = 800 Hz                         */
-#define BMI_ACC_PWR_CTRL_NORMAL     0x04u   /* 加速度计开启                               */
-#define BMI_GYRO_RANGE_2000DPS      0x01u   /* ±2000 °/s                                  */
+#define BMI_ACC_CONF_NORMAL_800HZ   0xABu   /* Normal BW，ODR = 800 Hz                    */
+#define BMI_GYRO_RANGE_2000DPS      0x00u   /* ±2000 °/s                                  */
 #define BMI_GYRO_BW_1000_116        0x02u   /* ODR 1000 Hz / 3-dB BW 116 Hz               */
 
 /* SPI 访问标志 */
@@ -68,6 +73,9 @@ extern osMutexId_t SPIMutexHandle;
 
 /* 软复位稳定时间（数据手册 §5.4）：典型 30 ms，规格 50 ms */
 #define BMI_ACC_SOFT_RESET_DELAY_MS 50u
+#define BMI_ACC_SPI_WAKE_DELAY_MS   1u
+#define BMI_ACC_ID_RETRY_COUNT      5u
+#define BMI_ACC_ID_RETRY_DELAY_MS   2u
 
 /* ------------------------------------------------------------------ */
 /* 灵敏度 / 单位转换                                                   */
@@ -96,8 +104,8 @@ static bool s_initialized = false;
 /** 拉低 PC4、拉高 PC5，选中加速度计。 */
 static inline void bmi_acc_select(void)
 {
-    HAL_GPIO_WritePin(BMI_ACC_CS_GPIO_Port,  BMI_ACC_CS_Pin,  GPIO_PIN_RESET);
     HAL_GPIO_WritePin(BMI_GYRO_CS_GPIO_Port, BMI_GYRO_CS_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(BMI_ACC_CS_GPIO_Port,  BMI_ACC_CS_Pin,  GPIO_PIN_RESET);
 }
 
 /** 拉高 PC4、拉低 PC5，选中陀螺仪。 */
@@ -149,12 +157,38 @@ static void bmi_bus_unlock(void)
 }
 
 /** 调度器感知延时：调度器运行时用 osDelay，启动阶段用 HAL_Delay。 */
+#if defined(DWT) && defined(CoreDebug) && \
+    defined(CoreDebug_DEMCR_TRCENA_Msk) && defined(DWT_CTRL_CYCCNTENA_Msk)
+#define BMI_HAS_DWT_DELAY 1
+static void bmi_busy_delay_ms(uint32_t ms)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+    uint32_t cycles_per_ms = SystemCoreClock / 1000u;
+    if (cycles_per_ms == 0u) {
+        cycles_per_ms = 1u;
+    }
+
+    while (ms-- > 0u) {
+        uint32_t start = DWT->CYCCNT;
+        while ((uint32_t)(DWT->CYCCNT - start) < cycles_per_ms) {
+            __NOP();
+        }
+    }
+}
+#endif
+
 static void bmi_delay_ms(uint32_t ms)
 {
     if (bmi_scheduler_running()) {
         (void)osDelay(ms);
     } else {
+#if defined(BMI_HAS_DWT_DELAY)
+        bmi_busy_delay_ms(ms);
+#else
         HAL_Delay(ms);
+#endif
     }
 }
 
@@ -280,13 +314,60 @@ static Driver_Status bmi_gyro_write_reg(uint8_t reg, uint8_t value)
     return st;
 }
 
+/**
+ * @brief 让加速度计从默认 I2C 接口切到 SPI 接口。
+ *
+ * BMI088 加速度计上电/复位后需要一次 CSB1 上升沿；用一次丢弃结果的
+ * Chip-ID 读取产生完整 SPI 事务，随后再正式读取寄存器。
+ */
+static Driver_Status bmi_acc_enter_spi_mode(void)
+{
+    uint8_t dummy = 0u;
+
+    bmi_deselect_all();
+    bmi_delay_ms(BMI_ACC_SPI_WAKE_DELAY_MS);
+
+    bmi_acc_select();
+    Driver_Status st = bmi_acc_read(BMI_ACC_REG_CHIP_ID, &dummy, 1u);
+    bmi_deselect_all();
+    bmi_delay_ms(BMI_ACC_SPI_WAKE_DELAY_MS);
+
+    return st;
+}
+
+static Driver_Status bmi_acc_read_id_retry(uint8_t *acc_id)
+{
+    if (acc_id == NULL) {
+        return DRV_ERR_PARAM;
+    }
+
+    Driver_Status st = DRV_OK;
+    for (uint32_t i = 0u; i < BMI_ACC_ID_RETRY_COUNT; ++i) {
+        st = bmi_acc_read_reg(BMI_ACC_REG_CHIP_ID, acc_id);
+        if (st != DRV_OK) {
+            return st;
+        }
+        if (*acc_id == BMI_ACC_CHIP_ID) {
+            return DRV_OK;
+        }
+        bmi_delay_ms(BMI_ACC_ID_RETRY_DELAY_MS);
+    }
+
+    return DRV_ERR_ID;
+}
+
 /* ------------------------------------------------------------------ */
 /* 公共 API                                                            */
 /* ------------------------------------------------------------------ */
 
 Driver_Status BMI088_Init(void)
 {
-    Driver_Status st = bmi_bus_lock();
+    Driver_Status st = DRV_OK;
+    uint8_t acc_id = 0u;
+    uint8_t gyro_id = 0u;
+
+    s_initialized = false;
+    st = bmi_bus_lock();
     if (st != DRV_OK) {
         return st;
     }
@@ -300,74 +381,76 @@ Driver_Status BMI088_Init(void)
     hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
     HAL_StatusTypeDef hs = HAL_SPI_Init(&hspi1);
     if (hs != HAL_OK) {
-        bmi_deselect_all();
-        bmi_bus_unlock();
-        return Driver_MapHalStatus(hs);
+        st = Driver_MapHalStatus(hs);
+        goto fail;
     }
 
-    /* 步骤 2：加速度计软复位（数据手册 §5.4）+ 等待 50 ms */
+    /* 步骤 2：产生 CSB1 上升沿，让加速度计进入 SPI 模式。 */
+    st = bmi_acc_enter_spi_mode();
+    if (st != DRV_OK) {
+        goto fail;
+    }
+
+    /* 步骤 3：加速度计软复位（数据手册 §5.4）+ 等待 50 ms */
     st = bmi_acc_write_reg(BMI_ACC_REG_SOFTRESET, BMI_ACC_SOFTRESET_VALUE);
     if (st != DRV_OK) {
-        bmi_deselect_all();
-        bmi_bus_unlock();
-        return st;
+        goto fail;
     }
     bmi_delay_ms(BMI_ACC_SOFT_RESET_DELAY_MS);
 
-    /* 步骤 3：哑读 Chip-ID 以唤醒加速度计 SPI 引擎。
+    /* 步骤 4：哑读 Chip-ID 以唤醒加速度计 SPI 引擎。
      * 软复位后首次 SPI 访问返回垃圾数据；需一次带片选切换的事务
      * 使芯片从 I2C 模式切换到 SPI 模式。丢弃结果。 */
-    {
-        uint8_t dummy = 0;
-        (void)bmi_acc_read_reg(BMI_ACC_REG_CHIP_ID, &dummy);
-    }
-
-    /* 步骤 4：验证加速度计 Chip ID = 0x1E */
-    uint8_t acc_id = 0;
-    st = bmi_acc_read_reg(BMI_ACC_REG_CHIP_ID, &acc_id);
+    st = bmi_acc_enter_spi_mode();
     if (st != DRV_OK) {
-        bmi_deselect_all();
-        bmi_bus_unlock();
-        return st;
-    }
-    if (acc_id != BMI_ACC_CHIP_ID) {
-        bmi_deselect_all();
-        bmi_bus_unlock();
-        return DRV_ERR_ID;
+        goto fail;
     }
 
-    /* 步骤 5：验证陀螺仪 Chip ID = 0x0F */
-    uint8_t gyro_id = 0;
+    /* 步骤 5：验证加速度计 Chip ID = 0x1E */
+    st = bmi_acc_read_id_retry(&acc_id);
+    if (st != DRV_OK) {
+        goto fail;
+    }
+
+    /* 步骤 6：验证陀螺仪 Chip ID = 0x0F */
     st = bmi_gyro_read_reg(BMI_GYRO_REG_CHIP_ID, &gyro_id);
     if (st != DRV_OK) {
-        bmi_deselect_all();
-        bmi_bus_unlock();
-        return st;
+        goto fail;
     }
     if (gyro_id != BMI_GYRO_CHIP_ID) {
-        bmi_deselect_all();
-        bmi_bus_unlock();
-        return DRV_ERR_ID;
+        st = DRV_ERR_ID;
+        goto fail;
     }
 
-    /* 步骤 6：配置加速度计
+    /* 步骤 7：配置加速度计
+     *   0x7D ← 0x04（加速度计开启）
+     *   等待至少 5 ms
+     *   0x7C ← 0x00（退出省电，进入 Active）
+     *   等待约 50 ms
      *   0x41 ← 0x01（量程 = ±6 g）
-     *   0x40 ← 0xAB（ODR = 800 Hz，BW = OSR4）
-     *   0x7D ← 0x04（电源控制 = Normal）*/
-    st = bmi_acc_write_reg(BMI_ACC_REG_RANGE,    BMI_ACC_RANGE_6G);
-    if (st != DRV_OK) { bmi_deselect_all(); bmi_bus_unlock(); return st; }
-    st = bmi_acc_write_reg(BMI_ACC_REG_CONF,     BMI_ACC_CONF_OSR4_800HZ);
-    if (st != DRV_OK) { bmi_deselect_all(); bmi_bus_unlock(); return st; }
-    st = bmi_acc_write_reg(BMI_ACC_REG_PWR_CTRL, BMI_ACC_PWR_CTRL_NORMAL);
-    if (st != DRV_OK) { bmi_deselect_all(); bmi_bus_unlock(); return st; }
+     *   0x40 ← 0xAB（ODR = 800 Hz，Normal BW）*/
+    st = bmi_acc_write_reg(BMI_ACC_REG_PWR_CTRL, BMI_ACC_PWR_CTRL_ENABLE);
+    if (st != DRV_OK) { goto fail; }
+    bmi_delay_ms(BMI_ACC_PWR_CTRL_DELAY_MS);
 
-    /* 步骤 7：配置陀螺仪
-     *   0x0F ← 0x01（量程 = ±2000 °/s）
+    st = bmi_acc_write_reg(BMI_ACC_REG_PWR_CONF, BMI_ACC_PWR_CONF_ACTIVE);
+    if (st != DRV_OK) { goto fail; }
+    bmi_delay_ms(BMI_ACC_POWER_UP_DELAY_MS);
+
+    st = bmi_acc_write_reg(BMI_ACC_REG_RANGE, BMI_ACC_RANGE_6G);
+    if (st != DRV_OK) { goto fail; }
+
+    st = bmi_acc_write_reg(BMI_ACC_REG_CONF, BMI_ACC_CONF_NORMAL_800HZ);
+    if (st != DRV_OK) { goto fail; }
+
+    /* 步骤 8：配置陀螺仪
+     *   0x0F ← 0x00（量程 = ±2000 °/s）
      *   0x10 ← 0x02（ODR 1000 Hz / BW 116 Hz）*/
-    st = bmi_gyro_write_reg(BMI_GYRO_REG_RANGE,     BMI_GYRO_RANGE_2000DPS);
-    if (st != DRV_OK) { bmi_deselect_all(); bmi_bus_unlock(); return st; }
+    st = bmi_gyro_write_reg(BMI_GYRO_REG_RANGE, BMI_GYRO_RANGE_2000DPS);
+    if (st != DRV_OK) { goto fail; }
+
     st = bmi_gyro_write_reg(BMI_GYRO_REG_BANDWIDTH, BMI_GYRO_BW_1000_116);
-    if (st != DRV_OK) { bmi_deselect_all(); bmi_bus_unlock(); return st; }
+    if (st != DRV_OK) { goto fail; }
 
     /* 所有配置成功——开启门控标志 */
     s_initialized = true;
@@ -375,6 +458,11 @@ Driver_Status BMI088_Init(void)
     bmi_deselect_all();
     bmi_bus_unlock();
     return DRV_OK;
+
+fail:
+    bmi_deselect_all();
+    bmi_bus_unlock();
+    return st;
 }
 
 Driver_Status BMI088_ReadAccel(float *ax, float *ay, float *az)

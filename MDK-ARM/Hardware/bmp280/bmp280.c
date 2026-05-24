@@ -1,9 +1,9 @@
 /**
  * @file    bmp280.c
- * @brief   BMP280 温度/气压传感器驱动（I2C1）实现。
+ * @brief   BMP280 温度/气压传感器驱动（I2C3）实现。
  *
- * 总线：I2C1（hi2c1），HAL 接受左移一位的 7-bit 地址。
- * 互斥锁：所有公共 API 在调度器运行时通过 I2CMutexHandle 加锁；
+ * 总线：I2C3（hi2c3），HAL 接受左移一位的 7-bit 地址。
+ * 互斥锁：所有公共 API 在调度器运行时通过 I2C3MutexHandle 加锁；
  *         调度器未启动时跳过加锁（单线程启动阶段）。
  */
 
@@ -79,8 +79,8 @@ static bool           s_t_fine_valid = false;
 /* 互斥锁 / 内核辅助函数                                              */
 /* ================================================================== */
 
-/* 共享 I2C 总线互斥锁由 Core/Src/freertos.c 中的 MX_FREERTOS_Init 创建 */
-extern osMutexId_t I2CMutexHandle;
+/* 共享 I2C3 总线互斥锁由 Core/Src/freertos.c 中的 MX_FREERTOS_Init 创建 */
+extern osMutexId_t I2C3MutexHandle;
 
 static inline bool bmp280_scheduler_running(void)
 {
@@ -97,7 +97,7 @@ static Driver_Status bmp280_lock(void)
     if (!bmp280_scheduler_running()) {
         return DRV_OK;
     }
-    if (osMutexAcquire(I2CMutexHandle, HAL_TIMEOUT_MS) != osOK) {
+    if (osMutexAcquire(I2C3MutexHandle, HAL_TIMEOUT_MS) != osOK) {
         return DRV_ERR_TIMEOUT;
     }
     return DRV_OK;
@@ -106,16 +106,36 @@ static Driver_Status bmp280_lock(void)
 static void bmp280_unlock(void)
 {
     if (bmp280_scheduler_running()) {
-        (void)osMutexRelease(I2CMutexHandle);
+        (void)osMutexRelease(I2C3MutexHandle);
     }
 }
+
+#if defined(DWT) && defined(CoreDebug) && \
+    defined(CoreDebug_DEMCR_TRCENA_Msk) && defined(DWT_CTRL_CYCCNTENA_Msk)
+static void bmp280_busy_delay_ms(uint32_t ms)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    uint32_t cycles_per_ms = SystemCoreClock / 1000u;
+    if (cycles_per_ms == 0u) cycles_per_ms = 1u;
+    while (ms-- > 0u) {
+        uint32_t start = DWT->CYCCNT;
+        while ((uint32_t)(DWT->CYCCNT - start) < cycles_per_ms) { __NOP(); }
+    }
+}
+#define BMP280_HAS_DWT_DELAY 1
+#endif
 
 static void bmp280_delay_ms(uint32_t ms)
 {
     if (bmp280_scheduler_running()) {
         (void)osDelay(ms);
     } else {
+#if defined(BMP280_HAS_DWT_DELAY)
+        bmp280_busy_delay_ms(ms);
+#else
         HAL_Delay(ms);
+#endif
     }
 }
 
@@ -132,7 +152,7 @@ static inline uint16_t bmp280_dev_addr(void)
 
 static Driver_Status bmp280_read_regs(uint8_t reg, uint8_t *buf, uint16_t len)
 {
-    HAL_StatusTypeDef hs = HAL_I2C_Mem_Read(&hi2c1, bmp280_dev_addr(),
+    HAL_StatusTypeDef hs = HAL_I2C_Mem_Read(&hi2c3, bmp280_dev_addr(),
                                             reg, I2C_MEMADD_SIZE_8BIT,
                                             buf, len, HAL_TIMEOUT_MS);
     return Driver_MapHalStatus(hs);
@@ -141,7 +161,7 @@ static Driver_Status bmp280_read_regs(uint8_t reg, uint8_t *buf, uint16_t len)
 static Driver_Status bmp280_write_reg(uint8_t reg, uint8_t value)
 {
     uint8_t v = value;
-    HAL_StatusTypeDef hs = HAL_I2C_Mem_Write(&hi2c1, bmp280_dev_addr(),
+    HAL_StatusTypeDef hs = HAL_I2C_Mem_Write(&hi2c3, bmp280_dev_addr(),
                                              reg, I2C_MEMADD_SIZE_8BIT,
                                              &v, 1u, HAL_TIMEOUT_MS);
     return Driver_MapHalStatus(hs);

@@ -20,8 +20,9 @@
 #include "main.h"
 #include "FreeRTOS.h"
 #include "cmsis_os2.h"
+#include "fatfs.h"
 #include "i2c.h"
-#include "quadspi.h"
+#include "sdmmc.h"
 #include "spi.h"
 #include "tim.h"
 #include "usart.h"
@@ -103,7 +104,9 @@ int main(void)
   MX_SPI1_Init();
   MX_TIM3_Init();
   MX_USART1_UART_Init();
-  MX_QUADSPI_Init();
+  MX_I2C3_Init();
+  MX_SDMMC1_SD_Init();
+  MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
   {
     Driver_Status hw_st = Hardware_Init();
