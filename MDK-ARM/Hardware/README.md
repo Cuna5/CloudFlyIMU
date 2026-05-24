@@ -165,7 +165,7 @@ BMI088 驱动实现。
 - 依赖 CubeMX 生成的 RTOS 互斥锁句柄：`I2CMutexHandle`、`SPIMutexHandle`。
 - 自己创建驱动层共享数据锁：`DataMutexHandle`。
 - `Core/Src/main.c` 在外设初始化后调用 `Hardware_Init()`。
-- `Core/Src/freertos.c` 创建 SensorTask、HeatTask、FusionTask、DebugTask 等任务框架；这些任务后续通过 `hardware.h` 使用本驱动层。
+- `Core/Src/freertos.c` 创建 SensorTask、HeatTask、FusionTask 等任务框架；这些任务后续通过 `hardware.h` 使用本驱动层。
 
 ## Keil/MDK-ARM 工程集成
 

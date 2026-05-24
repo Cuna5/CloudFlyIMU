@@ -67,6 +67,8 @@ void Error_Handler(void);
 #define BMI_ACC_CS_GPIO_Port GPIOC
 #define BMI_GYRO_CS_Pin GPIO_PIN_5
 #define BMI_GYRO_CS_GPIO_Port GPIOC
+#define LED_Pin GPIO_PIN_7
+#define LED_GPIO_Port GPIOH
 #define DEBUG_TX_Pin GPIO_PIN_14
 #define DEBUG_TX_GPIO_Port GPIOB
 #define DEBUG_RX_Pin GPIO_PIN_15

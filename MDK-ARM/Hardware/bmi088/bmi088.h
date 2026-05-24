@@ -32,9 +32,9 @@ extern "C" {
  *   3. 发送一次虚拟 Chip ID 读取，强制加速度计进入 SPI 模式（数据手册 §6.1.2）。
  *   4. 读取加速度计 Chip ID（0x00），验证等于 0x1E。
  *   5. 读取陀螺仪 Chip ID（0x00），验证等于 0x0F。
- *   6. 配置加速度计：0x41←0x01（量程 ±6g），0x40←0xAB（ODR 800Hz/OSR4），
- *      0x7D←0x04（Normal 模式）。
- *   7. 配置陀螺仪：0x0F←0x01（量程 ±2000°/s），0x10←0x02（ODR 1000Hz/BW 116Hz）。
+ *   6. 配置加速度计：0x7D←0x04（使能），0x7C←0x00（Active），
+ *      0x41←0x01（量程 ±6g），0x40←0xAB（ODR 800Hz/Normal BW）。
+ *   7. 配置陀螺仪：0x0F←0x00（量程 ±2000°/s），0x10←0x02（ODR 1000Hz/BW 116Hz）。
  *   8. 标记模块已初始化。
  *
  * @return DRV_OK 成功；DRV_ERR_ID 加速度计或陀螺仪 Chip ID 不匹配；

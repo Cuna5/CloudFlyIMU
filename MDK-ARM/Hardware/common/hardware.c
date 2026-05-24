@@ -187,8 +187,8 @@ Driver_Status AttitudeData_Get(AttitudeData_t *dst)
 /**
  * @brief 按固定顺序初始化整个驱动层。
  *
- * 顺序：Debug_UART → BMP280 → IST8310 → BMI088 → Heater → W25Q64。
- * 遇到第一个非 DRV_OK 的子模块立即返回（W25Q64 失败除外，仅记日志）。
+ * Order: Debug_UART -> BMP280 -> IST8310 -> BMI088 -> Heater -> SDStorage.
+ * SDStorage is non-critical at boot; parameter users can fall back to defaults.
  */
 Driver_Status Hardware_Init(void)
 {
@@ -201,6 +201,8 @@ Driver_Status Hardware_Init(void)
     }
 
     /* ---- 步骤 2：按顺序初始化子模块 ---- */
+
+    LED_Init();
 
     /* 模块 0：Debug_UART（必须最先初始化，其他模块依赖它输出错误日志） */
     err = DebugUART_Init();
@@ -237,10 +239,10 @@ Driver_Status Hardware_Init(void)
         return err;
     }
 
-    /* Module 5: W25Q64 QSPI Flash（非关键，失败只记日志，不阻断启动） */
-    err = W25Q64_Init();
+    /* Module 5: SD/FatFs storage (non-critical, parameters can use defaults) */
+    err = SDStorage_Init();
     if (err != DRV_OK) {
-        Debug_Log_Level(DBG_WARN, "W25Q64 init failed: %d (params will use defaults)", (int)err);
+        Debug_Log_Level(DBG_WARN, "SD storage init failed: %d (params will use defaults)", (int)err);
     }
 
     return DRV_OK;
