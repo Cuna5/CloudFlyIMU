@@ -251,6 +251,7 @@ Driver_Status Heater_ApplyDuty(float duty);
 /* ================================================================== */
 #include "led.h"
 #include "debug_uart.h"
+#include "oled.h"
 #include "bmp280.h"
 #include "ist8310.h"
 #include "bmi088.h"

@@ -107,6 +107,7 @@ int main(void)
   MX_I2C3_Init();
   MX_SDMMC1_SD_Init();
   MX_FATFS_Init();
+  MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
   {
     Driver_Status hw_st = Hardware_Init();

@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>USE_PWR_LDO_SUPPLY,USE_HAL_DRIVER,STM32H743xx</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../USB_DEVICE/App;../USB_DEVICE/Target;../Middlewares/ST/STM32_USB_Device_Library/Core/Inc;../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc;Hardware/common;Hardware/bmi088;Hardware/bmp280;Hardware/ist8310;Hardware/heater;Hardware/debug_uart;Hardware/ekf;./Hardware/mahony;./Hardware/sd_storage;./Hardware/pid;Hardware/led;../FATFS/Target;../FATFS/App;../Middlewares/Third_Party/FatFs/src</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../USB_DEVICE/App;../USB_DEVICE/Target;../Middlewares/ST/STM32_USB_Device_Library/Core/Inc;../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc;Hardware/common;Hardware/bmi088;Hardware/bmp280;Hardware/ist8310;Hardware/heater;Hardware/debug_uart;Hardware/oled;Hardware/ekf;./Hardware/mahony;./Hardware/sd_storage;./Hardware/pid;Hardware/led;../FATFS/Target;../FATFS/App;../Middlewares/Third_Party/FatFs/src</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -358,7 +358,7 @@
               <MiscControls></MiscControls>
               <Define></Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;Hardware/common;Hardware/bmi088;Hardware/bmp280;Hardware/ist8310;Hardware/heater;Hardware/debug_uart;Hardware/ekf</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/RTOS2/Include;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;Hardware/common;Hardware/bmi088;Hardware/bmp280;Hardware/ist8310;Hardware/heater;Hardware/debug_uart;Hardware/oled;Hardware/ekf</IncludePath>
             </VariousControls>
           </Aads>
           <LDads>
@@ -2278,6 +2278,11 @@
               <FilePath>Hardware/common/hardware.c</FilePath>
             </File>
             <File>
+              <FileName>function.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>Hardware/common/function.c</FilePath>
+            </File>
+            <File>
               <FileName>debug_uart.c</FileName>
               <FileType>1</FileType>
               <FilePath>Hardware/debug_uart/debug_uart.c</FilePath>
@@ -2306,6 +2311,11 @@
               <FileName>heater.c</FileName>
               <FileType>1</FileType>
               <FilePath>Hardware/heater/heater.c</FilePath>
+            </File>
+            <File>
+              <FileName>oled.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>Hardware/oled/oled.c</FilePath>
             </File>
             <File>
               <FileName>ekf.c</FileName>

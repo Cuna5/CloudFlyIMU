@@ -22,15 +22,7 @@ extern "C" {
 #endif
 
 /**
- * @brief 初始化 TIM3_CH1 PWM 输出，并在频率超出范围时自动修正为约 1 Hz。
- *
- * 步骤：
- *   1. 根据 htim3.Init.Prescaler/Period 计算当前频率：f = 240MHz/((PSC+1)*(ARR+1))。
- *   2. 若 f 超出 [0.9, 1.1] Hz，强制设置 PSC=24000-1、ARR=10000-1（1 Hz）。
- *   3. 设置 CCR1=0，s_current_duty=0。
- *   4. 调用 HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1)，非 OK 状态经
- *      Driver_MapHalStatus 映射后返回。
- *   5. 标记模块已初始化，清除故障锁存，返回 DRV_OK。
+ * @brief 初始化 TIM3_CH1 PWM 输出，设置 CCR1=0，启动 PWM。
  */
 Driver_Status Heater_Init(void);
 

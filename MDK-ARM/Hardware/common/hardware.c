@@ -212,11 +212,11 @@ Driver_Status Hardware_Init(void)
     }
 
     /* 模块 1：BMP280 */
-    err = BMP280_Init();
-    if (err != DRV_OK) {
-        Debug_Log_Level(DBG_ERR, "BMP280 init failed: %d", (int)err);
-        return err;
-    }
+//    err = BMP280_Init();
+//    if (err != DRV_OK) {
+//        Debug_Log_Level(DBG_ERR, "BMP280 init failed: %d", (int)err);
+//        return err;
+//    }
 
     /* 模块 2：IST8310 */
     err = IST8310_Init();
