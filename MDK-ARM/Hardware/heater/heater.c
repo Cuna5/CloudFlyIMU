@@ -28,21 +28,6 @@ static bool  s_fault_latched = false;
 static float s_current_duty  = 0.0f;
 
 /* ================================================================== */
-/* 1 Hz 频率自动修正常量                                               */
-/* ================================================================== */
-
-/** APB1 定时器内核时钟（STM32H743 默认 RCC 配置下为 240 MHz）。 */
-#define HEATER_TIM3_CLOCK_HZ    240000000.0f
-
-/** 可接受的 PWM 频率范围 [0.9, 1.1] Hz。 */
-#define HEATER_FREQ_LO_HZ       0.9f
-#define HEATER_FREQ_HI_HZ       1.1f
-
-/** 强制 1 Hz 配置：24000 * 10000 = 2.4e8 个时钟周期。 */
-#define HEATER_FORCE_PSC        (24000U - 1U)
-#define HEATER_FORCE_ARR        (10000U - 1U)
-
-/* ================================================================== */
 /* 内部辅助函数                                                        */
 /* ================================================================== */
 
@@ -84,31 +69,7 @@ static void heater_emergency_stop_locked(void)
 
 Driver_Status Heater_Init(void)
 {
-    /* --- 1. 频率自动修正 -------------------------------------------- */
-    const uint32_t psc_plus_1 = htim3.Init.Prescaler + 1U;
-    const uint32_t arr_plus_1 = htim3.Init.Period    + 1U;
-
-    /* 防御性检查：(PSC, ARR) = (0, 0) 时 f = 240 MHz，远超范围，由下方 if 处理 */
-    bool needs_force = false;
-    if (psc_plus_1 == 0U || arr_plus_1 == 0U) {
-        needs_force = true;
-    } else {
-        const float ticks_per_period = (float)psc_plus_1 * (float)arr_plus_1;
-        const float f_hz = HEATER_TIM3_CLOCK_HZ / ticks_per_period;
-        if (f_hz < HEATER_FREQ_LO_HZ || f_hz > HEATER_FREQ_HI_HZ) {
-            needs_force = true;
-        }
-    }
-
-    if (needs_force) {
-        __HAL_TIM_SET_PRESCALER (&htim3, HEATER_FORCE_PSC);
-        __HAL_TIM_SET_AUTORELOAD(&htim3, HEATER_FORCE_ARR);
-        /* HAL 宏写入寄存器；同步更新 Init 缓存字段，供 Heater_SetDuty 读取 */
-        htim3.Init.Prescaler = HEATER_FORCE_PSC;
-        htim3.Init.Period    = HEATER_FORCE_ARR;
-    }
-
-    /* --- 2. 使能输出前将占空比重置为 0 -------------------------------- */
+    /* --- 1. 使能输出前将占空比重置为 0 -------------------------------- */
     s_current_duty = 0.0f;
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0u);
 

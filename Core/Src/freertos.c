@@ -21,12 +21,13 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "main.h"
-#include "FreeRTOS.h"
 #include "cmsis_os2.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "hardware.h"
+#include "function.h"
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,38 +37,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define SENSOR_TASK_PERIOD_MS          1U
-#define SENSOR_PRESSURE_DIV            100U
 #define HEAT_TASK_PERIOD_MS            100U
-#define FUSION_TASK_PERIOD_MS          1U
-/* Mahony 增益，可通过宏覆盖 */
-#ifndef MAHONY_KP
-#define MAHONY_KP   2.0f
-#endif
-#ifndef MAHONY_KI
-#define MAHONY_KI   0.005f
-#endif
-
-/* 磁场可靠性判断阈值（微特斯拉） */
-#ifndef MAG_NORM_MIN
-#define MAG_NORM_MIN   20.0f
-#endif
-#ifndef MAG_NORM_MAX
-#define MAG_NORM_MAX   80.0f
-#endif
-
-#ifndef HEAT_TARGET_C
-#define HEAT_TARGET_C   40.0f
-#endif
-#ifndef HEAT_PID_KP
-#define HEAT_PID_KP     5.0f
-#endif
-#ifndef HEAT_PID_KI
-#define HEAT_PID_KI     0.1f
-#endif
-#ifndef HEAT_PID_KD
-#define HEAT_PID_KD     0.5f
-#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -107,6 +77,13 @@ const osThreadAttr_t FusionTask_attributes = {
   .stack_size = 4096 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
+/* Definitions for DebugTask */
+osThreadId_t DebugTaskHandle;
+const osThreadAttr_t DebugTask_attributes = {
+  .name = "DebugTask",
+  .stack_size = 2048 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
 /* Definitions for I2CMutex */
 osMutexId_t I2CMutexHandle;
 const osMutexAttr_t I2CMutex_attributes = {
@@ -126,9 +103,29 @@ void StartDefaultTask(void *argument);
 void StartTask02(void *argument);
 void StartTask03(void *argument);
 void StartTask04(void *argument);
+void StartTask05(void *argument);
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
+
+/* Hook prototypes */
+void configureTimerForRunTimeStats(void);
+unsigned long getRunTimeCounterValue(void);
+
+/* USER CODE BEGIN 1 */
+/* Functions needed when configGENERATE_RUN_TIME_STATS is on */
+__weak void configureTimerForRunTimeStats(void)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+__weak unsigned long getRunTimeCounterValue(void)
+{
+return DWT->CYCCNT;
+}
+/* USER CODE END 1 */
 
 /**
   * @brief  FreeRTOS initialization
@@ -179,6 +176,9 @@ void MX_FREERTOS_Init(void) {
   /* creation of FusionTask */
   FusionTaskHandle = osThreadNew(StartTask04, NULL, &FusionTask_attributes);
 
+  /* creation of DebugTask */
+  DebugTaskHandle = osThreadNew(StartTask05, NULL, &DebugTask_attributes);
+
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
@@ -221,49 +221,7 @@ void StartDefaultTask(void *argument)
 void StartTask02(void *argument)
 {
   /* USER CODE BEGIN StartTask02 */
-  (void)argument;
-  SensorData_t sample = {0};
-  uint32_t pressure_div = 0U;
-  uint32_t last_warn_ms = 0U;
-  bool first_warn = true;
-
-  /* Infinite loop */
-  for(;;)
-  {
-    Driver_Status st = Sensor_SampleOnce(&sample);
-
-    pressure_div++;
-    if (pressure_div >= SENSOR_PRESSURE_DIV)
-    {
-      pressure_div = 0U;
-      float pressure_pa = sample.pressure;
-      Driver_Status p_st = BMP280_ReadPressure(&pressure_pa);
-      if (p_st == DRV_OK)
-      {
-        sample.pressure = pressure_pa;
-      }
-      else if (st == DRV_OK)
-      {
-        st = p_st;
-      }
-    }
-
-    (void)Heater_GetDuty(&sample.pwm_duty);
-    (void)SensorData_Set(&sample);
-
-    if (st != DRV_OK)
-    {
-      uint32_t now_ms = HAL_GetTick();
-      if (first_warn || ((now_ms - last_warn_ms) >= 1000U))
-      {
-        first_warn = false;
-        last_warn_ms = now_ms;
-        Debug_Log_Level(DBG_WARN, "Sensor sample err=%d", (int)st);
-      }
-    }
-
-    osDelay(SENSOR_TASK_PERIOD_MS);
-  }
+  Task_Sensor();
   /* USER CODE END StartTask02 */
 }
 
@@ -277,18 +235,13 @@ void StartTask02(void *argument)
 void StartTask03(void *argument)
 {
   /* USER CODE BEGIN StartTask03 */
-  (void)argument;
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(HEAT_TASK_PERIOD_MS);
-  }
+  Task_Heat();
   /* USER CODE END StartTask03 */
 }
 
 /* USER CODE BEGIN Header_StartTask04 */
 /**
-* @brief Function implementing the FusionTask thread.
+* @brief Function implementing the MahonyTask thread.
 * @param argument: Not used
 * @retval None
 */
@@ -296,17 +249,25 @@ void StartTask03(void *argument)
 void StartTask04(void *argument)
 {
   /* USER CODE BEGIN StartTask04 */
-  (void)argument;
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(FUSION_TASK_PERIOD_MS);
-  }
+  Task_EKFFusion();
   /* USER CODE END StartTask04 */
+}
+
+/* USER CODE BEGIN Header_StartTask05 */
+/**
+* @brief Function implementing the DebugTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask05 */
+void StartTask05(void *argument)
+{
+  /* USER CODE BEGIN StartTask05 */
+  Task_Debug();
+  /* USER CODE END StartTask05 */
 }
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
-
 /* USER CODE END Application */
 
