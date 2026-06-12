@@ -250,6 +250,7 @@ Driver_Status Heater_ApplyDuty(float duty);
 /* 放在最后，使各子模块头文件可以使用上方定义的共享类型和宏。          */
 /* ================================================================== */
 #include "led.h"
+#include "rgb_led.h"
 #include "debug_uart.h"
 #include "oled.h"
 #include "bmp280.h"
@@ -258,6 +259,7 @@ Driver_Status Heater_ApplyDuty(float duty);
 #include "heater.h"
 #include "pid.h"
 #include "sd_storage.h"
+#include "csv_logger.h"
 #include "mahony.h"
 #include "ekf.h"
 

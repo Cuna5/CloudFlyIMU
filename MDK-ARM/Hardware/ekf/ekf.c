@@ -1,7 +1,16 @@
+/**
+ * @file    ekf.c
+ * @brief   四元数 + 陀螺仪 bias 的 7 维 EKF 姿态融合实现。
+ *
+ * 状态向量 x = [q0, q1, q2, q3, bgx, bgy, bgz]^T
+ * 预测：四元数运动学积分 + bias 随机游走
+ * 更新：加速度计（Roll/Pitch）+ 磁力计（Yaw，按可靠性加权）
+ */
 #include "ekf.h"
 #include <math.h>
 #include <string.h>
 
+/* 快速平方根倒数（Quake III 算法），用于四元数归一化 */
 static float inv_sqrt(float x)
 {
     float y = x;
@@ -11,7 +20,7 @@ static float inv_sqrt(float x)
     return y * (1.5f - 0.5f * x * y * y);
 }
 
-/* P = A*P*A^T + Q */
+/* 协方差预测：P = A*P*A^T + Q */
 static void cov_predict(float P[][EKF_N], const float A[][EKF_N],
                         const float Q[][EKF_N])
 {

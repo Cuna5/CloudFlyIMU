@@ -203,6 +203,7 @@ Driver_Status Hardware_Init(void)
     /* ---- 步骤 2：按顺序初始化子模块 ---- */
 
     LED_Init();
+    RGBLED_Init();
 
     /* 模块 0：Debug_UART（必须最先初始化，其他模块依赖它输出错误日志） */
     err = DebugUART_Init();

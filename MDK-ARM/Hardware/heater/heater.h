@@ -3,7 +3,7 @@
  * @brief   加热 PWM 驱动（TIM3_CH1，PC6）公共 API。
  *
  * 加热器通过 PC6 驱动 YJL3400A N-MOSFET，控制 5V/10Ω/5W 加热电阻。
- * 输出为约 1 Hz 的慢速 PWM，由 TIM3_CH1 产生。
+ * 输出为 200 Hz 的 PWM（TIM3_CH1，PSC=1199，ARR=999，定时器时钟 240 MHz），由 TIM3_CH1 产生。
  *
  * 状态模型：
  *   - 未初始化  → 所有非初始化 API 返回 DRV_ERR_NOT_INIT。

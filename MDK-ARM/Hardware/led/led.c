@@ -1,3 +1,11 @@
+/**
+ * @file    led.c
+ * @brief   单色状态 LED 驱动（共阳，高电平灭灯）实现。
+ *
+ * LED 接 LED_GPIO_Port/LED_Pin，共阳接法：
+ *   GPIO_PIN_SET   → 灭灯
+ *   GPIO_PIN_RESET → 亮灯
+ */
 #include "hardware.h"
 #include "main.h"
 
