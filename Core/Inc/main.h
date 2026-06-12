@@ -79,6 +79,12 @@ void Error_Handler(void);
 #define OLED_SCK_GPIO_Port GPIOB
 #define LED_Pin GPIO_PIN_7
 #define LED_GPIO_Port GPIOH
+#define RGB_R_Pin GPIO_PIN_10
+#define RGB_R_GPIO_Port GPIOH
+#define RGB_G_Pin GPIO_PIN_11
+#define RGB_G_GPIO_Port GPIOH
+#define RGB_B_Pin GPIO_PIN_12
+#define RGB_B_GPIO_Port GPIOH
 #define OLED_RST_Pin GPIO_PIN_12
 #define OLED_RST_GPIO_Port GPIOB
 #define DEBUG_TX_Pin GPIO_PIN_14

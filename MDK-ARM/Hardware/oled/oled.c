@@ -1,3 +1,11 @@
+/**
+ * @file    oled.c
+ * @brief   SSD1306 OLED 显示驱动（SPI2，128×64）实现。
+ *
+ * 采用帧缓冲区策略：所有绘图操作写入 s_buffer，
+ * 调用 OLED_Update 后通过 SPI 一次性刷新到屏幕（页寻址模式）。
+ * FreeRTOS 调度器运行时通过 s_oled_mutex 串行化并发访问。
+ */
 #include "hardware.h"
 #include "main.h"
 #include "spi.h"
@@ -6,13 +14,13 @@
 #include <stdio.h>
 #include <string.h>
 
-#define OLED_PAGE_COUNT        (OLED_HEIGHT / 8U)
+#define OLED_PAGE_COUNT        (OLED_HEIGHT / 8U)           /* 页数 = 高度/8 */
 #define OLED_FRAMEBUFFER_SIZE  (OLED_WIDTH * OLED_PAGE_COUNT)
-#define OLED_CHAR_WIDTH        6U
-#define OLED_CHAR_HEIGHT       8U
+#define OLED_CHAR_WIDTH        6U   /* 字符宽度（5 像素 + 1 间距） */
+#define OLED_CHAR_HEIGHT       8U   /* 字符高度 */
 
 static bool s_initialized = false;
-static uint8_t s_buffer[OLED_FRAMEBUFFER_SIZE];
+static uint8_t s_buffer[OLED_FRAMEBUFFER_SIZE];  /* 帧缓冲区 */
 static uint8_t s_cursor_x = 0U;
 static uint8_t s_cursor_y = 0U;
 static osMutexId_t s_oled_mutex;

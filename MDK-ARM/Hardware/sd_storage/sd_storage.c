@@ -1,12 +1,22 @@
+/**
+ * @file    sd_storage.c
+ * @brief   基于 SD/FatFs 的应用参数持久化存储驱动实现。
+ *
+ * 参数文件格式（SdParamFile_t）：
+ *   [crc32(4)] [magic(4)] [version(1)] [reserved(3)] [AppParams_t(128)]
+ * 写入后回读验证，确保数据完整性。
+ */
 #include "hardware.h"
 #include "fatfs.h"
 
 #include <string.h>
 
-#define SD_PARAM_MAGIC      0x4346494DU
+/* 参数文件标识与版本 */
+#define SD_PARAM_MAGIC      0x4346494DU   /* "CFIM" */
 #define SD_PARAM_VERSION    1U
 #define SD_PARAM_FILE       "0:/CFIMUCFG.BIN"
 
+/** 参数文件在磁盘上的完整布局（含校验头）。 */
 typedef struct {
     uint32_t crc32;
     uint32_t magic;
@@ -18,6 +28,7 @@ typedef struct {
 static bool s_initialized;
 static bool s_mounted;
 
+/** @brief 计算 data[0..len-1] 的 CRC32（IEEE 802.3 多项式）。 */
 static uint32_t sd_crc32_calc(const uint8_t *data, uint32_t len)
 {
     uint32_t crc = 0xFFFFFFFFU;
@@ -30,6 +41,7 @@ static uint32_t sd_crc32_calc(const uint8_t *data, uint32_t len)
     return crc ^ 0xFFFFFFFFU;
 }
 
+/** @brief 将 FatFs FRESULT 映射为统一驱动返回码。 */
 static Driver_Status sd_map_fresult(FRESULT fr)
 {
     switch (fr) {
@@ -51,6 +63,7 @@ static Driver_Status sd_map_fresult(FRESULT fr)
     }
 }
 
+/** @brief 立即挂载 SD 文件系统（仅在未挂载时执行）。 */
 static Driver_Status sd_mount_now(void)
 {
     if (s_mounted) {
@@ -70,6 +83,7 @@ static Driver_Status sd_mount_now(void)
     return DRV_OK;
 }
 
+/** @brief 确保 SD 已初始化并挂载，调度器未运行时跳过挂载。 */
 static Driver_Status sd_ensure_mounted(void)
 {
     Driver_Status st;
@@ -92,6 +106,7 @@ static Driver_Status sd_ensure_mounted(void)
     return sd_mount_now();
 }
 
+/** @brief 验证参数文件的 magic、版本号和 CRC32。 */
 static bool sd_param_file_is_valid(const SdParamFile_t *file)
 {
     if (file == NULL) {
@@ -105,6 +120,7 @@ static bool sd_param_file_is_valid(const SdParamFile_t *file)
     return file->crc32 == crc;
 }
 
+/** @brief 从 SD 卡读取并校验参数文件到 file 缓冲区。 */
 static Driver_Status sd_read_param_file(SdParamFile_t *file)
 {
     if (file == NULL) {

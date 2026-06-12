@@ -1,19 +1,32 @@
+/**
+ * @file    w25q64.c
+ * @brief   W25Q64 QSPI NOR Flash 底层驱动实现。
+ *
+ * 使用 STM32 QSPI 外设（hqspi）操作 W25Q64：
+ *   - 读 ID：单线指令 0x9F，接收 3 字节
+ *   - 快速读：单线指令 0x6B，四线数据，8 哑周期
+ *   - 扇区擦除：单线指令 0x20，4 KB 对齐
+ *   - 页编程：单线指令 0x32，四线数据，最大 256 字节
+ * 写操作前均自动发送写使能（0x06），完成后轮询状态寄存器忙标志。
+ */
 #include "hardware.h"
 #include "quadspi.h"
 
-#define CMD_READ_ID         0x9FU
-#define CMD_READ_DATA       0x6BU
-#define CMD_WRITE_ENABLE    0x06U
-#define CMD_SECTOR_ERASE    0x20U
-#define CMD_PAGE_PROGRAM    0x32U
-#define CMD_READ_SR1        0x05U
+/* QSPI 指令码 */
+#define CMD_READ_ID         0x9FU   /* 读 JEDEC ID */
+#define CMD_READ_DATA       0x6BU   /* Quad 输出快速读 */
+#define CMD_WRITE_ENABLE    0x06U   /* 写使能 */
+#define CMD_SECTOR_ERASE    0x20U   /* 4 KB 扇区擦除 */
+#define CMD_PAGE_PROGRAM    0x32U   /* Quad 输入页编程 */
+#define CMD_READ_SR1        0x05U   /* 读状态寄存器 1 */
 
-#define W25Q64_JEDEC_ID     0xEF4017U
-#define W25Q64_PAGE_SIZE    256U
-#define W25Q64_SECTOR_SIZE  4096U
+#define W25Q64_JEDEC_ID     0xEF4017U   /* 期望的 JEDEC ID */
+#define W25Q64_PAGE_SIZE    256U        /* 页大小，字节 */
+#define W25Q64_SECTOR_SIZE  4096U       /* 扇区大小，字节 */
 
 static bool s_initialized = false;
 
+/** @brief 轮询状态寄存器 BUSY 位，直到操作完成或超时（3 秒）。 */
 static Driver_Status qspi_wait_busy(void)
 {
     QSPI_CommandTypeDef cmd = {0};
@@ -41,6 +54,7 @@ static Driver_Status qspi_wait_busy(void)
     return DRV_OK;
 }
 
+/** @brief 发送写使能命令（0x06），擦除/编程前必须调用。 */
 static Driver_Status qspi_write_enable(void)
 {
     QSPI_CommandTypeDef cmd = {0};

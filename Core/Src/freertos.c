@@ -21,6 +21,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "main.h"
+#include "FreeRTOS.h"
 #include "cmsis_os2.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -84,6 +85,13 @@ const osThreadAttr_t DebugTask_attributes = {
   .stack_size = 2048 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
+/* Definitions for SdLogTask */
+osThreadId_t SdLogTaskHandle;
+const osThreadAttr_t SdLogTask_attributes = {
+  .name = "SdLogTask",
+  .stack_size = 1024 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
 /* Definitions for I2CMutex */
 osMutexId_t I2CMutexHandle;
 const osMutexAttr_t I2CMutex_attributes = {
@@ -104,6 +112,7 @@ void StartTask02(void *argument);
 void StartTask03(void *argument);
 void StartTask04(void *argument);
 void StartTask05(void *argument);
+void StartTask06(void *argument);
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -178,6 +187,9 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of DebugTask */
   DebugTaskHandle = osThreadNew(StartTask05, NULL, &DebugTask_attributes);
+
+  /* creation of SdLogTask */
+  SdLogTaskHandle = osThreadNew(StartTask06, NULL, &SdLogTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -265,6 +277,20 @@ void StartTask05(void *argument)
   /* USER CODE BEGIN StartTask05 */
   Task_Debug();
   /* USER CODE END StartTask05 */
+}
+
+/* USER CODE BEGIN Header_StartTask06 */
+/**
+* @brief Function implementing the SdLogTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask06 */
+void StartTask06(void *argument)
+{
+  /* USER CODE BEGIN StartTask06 */
+  Task_SdLog();
+  /* USER CODE END StartTask06 */
 }
 
 /* Private application code --------------------------------------------------*/

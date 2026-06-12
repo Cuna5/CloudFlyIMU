@@ -1,23 +1,35 @@
+/**
+ * @file    function.c
+ * @brief   FreeRTOS 任务实现：传感器采样、加热控制、姿态融合、调试显示。
+ *
+ * 各任务通过 hardware.h 提供的共享数据接口（SensorData_Get/Set、
+ * AttitudeData_Get/Set）与其他任务交换数据，互斥锁由 DataMutexHandle 保护。
+ */
 #include "function.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "cmsis_os2.h"
 #include <math.h>
 
+/* 任务周期（毫秒） */
 #define SENSOR_TASK_PERIOD_MS          5U
-#define SENSOR_PRESSURE_DIV            100U
+#define SD_LOG_TASK_PERIOD_MS          20U
+#define SENSOR_PRESSURE_DIV            100U   /* 气压每 N 次传感器周期采样一次 */
 #define MAHONY_TASK_PERIOD_MS          5U
 #define OLED_TASK_PERIOD_MS            50U
-#define OLED_INIT_RETRY_MS             1000U
-#define OLED_ATTITUDE_STALE_MS         500U
+#define OLED_INIT_RETRY_MS             1000U  /* OLED 初始化失败后重试间隔 */
+#define OLED_ATTITUDE_STALE_MS         500U   /* 姿态数据超时阈值 */
 #define OLED_RAD_TO_DEG                57.2957795f
 
+/* Mahony 滤波器默认增益（可在编译时覆盖） */
 #ifndef MAHONY_KP
 #define MAHONY_KP   2.0f
 #endif
 #ifndef MAHONY_KI
 #define MAHONY_KI   0.005f
 #endif
+
+/* 磁力计可靠性判断阈值（µT） */
 #ifndef MAG_NORM_MIN
 #define MAG_NORM_MIN   20.0f
 #endif
@@ -28,6 +40,7 @@
 #define MAG_RELIABILITY_MODE_THRESHOLD   0.10f
 #endif
 
+/** @brief 计算距上次调用的时间步长（秒），异常值夹紧到标称周期。 */
 static float Mahony_CalcDt(uint32_t now_ms, uint32_t *last_ms)
 {
   uint32_t elapsed_ms = now_ms - *last_ms;
@@ -37,6 +50,7 @@ static float Mahony_CalcDt(uint32_t now_ms, uint32_t *last_ms)
   return (float)elapsed_ms * 0.001f;
 }
 
+/** @brief 将浮点值夹紧到 [0, 1]。 */
 static float Mahony_Clamp01(float v)
 {
   if (v < 0.0f) return 0.0f;
@@ -44,6 +58,12 @@ static float Mahony_Clamp01(float v)
   return v;
 }
 
+/**
+ * @brief 根据磁场模长计算磁力计可靠性 [0, 1]。
+ *
+ * 模长在 [MAG_NORM_MIN, MAG_NORM_MAX] 范围内返回 1.0，
+ * 超出范围时线性衰减到 0，用于 Mahony/EKF 的磁力计加权。
+ */
 static float Mahony_CalcMagReliability(const SensorData_t *s)
 {
   float n = sqrtf(s->mx * s->mx + s->my * s->my + s->mz * s->mz);
@@ -53,11 +73,13 @@ static float Mahony_CalcMagReliability(const SensorData_t *s)
   return 1.0f;
 }
 
+/** @brief 检查浮点值是否为有限数（非 NaN、非 Inf）。 */
 static bool Oled_IsFinite(float v)
 {
   return (v == v) && (v > -1.0e30f) && (v < 1.0e30f);
 }
 
+/** @brief 获取当前 CPU 总体占用率（百分比，0-100）。 */
 static uint32_t Cpu_GetUsagePercent(void)
 {
   TaskStatus_t tasks[12];
@@ -329,6 +351,41 @@ void Task_EKFFusion(void)
       attitude.ekf_mode = (mag_rel >= MAG_RELIABILITY_MODE_THRESHOLD) ? 2U : 1U;
 
       (void)AttitudeData_Set(&attitude);
+
+      /* 推入 CSV 环形缓冲区（每 4 次推一次，即 20 ms / 50 Hz） */
+      static uint32_t csv_div = 0U;
+      csv_div++;
+      if (csv_div >= 4U) {
+        csv_div = 0U;
+        CsvRecord_t rec;
+        rec.time_ms   = now_ms;
+        rec.T         = sensor.temperature;
+        rec.pwm       = sensor.pwm_duty;
+        rec.ax        = sensor.ax;
+        rec.ay        = sensor.ay;
+        rec.az        = sensor.az;
+        rec.gx        = sensor.gx;
+        rec.gy        = sensor.gy;
+        rec.gz        = sensor.gz;
+        rec.mx        = sensor.mx;
+        rec.my        = sensor.my;
+        rec.mz        = sensor.mz;
+        rec.bgx       = attitude.bgx;
+        rec.bgy       = attitude.bgy;
+        rec.bgz       = attitude.bgz;
+        rec.gx_c      = sensor.gx - attitude.bgx;
+        rec.gy_c      = sensor.gy - attitude.bgy;
+        rec.gz_c      = sensor.gz - attitude.bgz;
+        rec.mag_norm  = sqrtf(sensor.mx*sensor.mx +
+                              sensor.my*sensor.my +
+                              sensor.mz*sensor.mz);
+        rec.mag_score = mag_rel;
+        rec.roll      = attitude.roll;
+        rec.pitch     = attitude.pitch;
+        rec.yaw       = attitude.yaw;
+        rec.ekf_mode  = attitude.ekf_mode;
+        (void)CsvLogger_Push(&rec);
+      }
     }
     else
     {
@@ -428,5 +485,39 @@ void Task_Debug(void)
     }
 
     osDelay(OLED_TASK_PERIOD_MS);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+
+void Task_SdLog(void)
+{
+  /* 等待 SD 卡就绪（最多 5 秒） */
+  for (uint32_t i = 0U; i < 50U; i++) {
+    if (SDStorage_IsReady()) break;
+    osDelay(100U);
+  }
+
+  Driver_Status st = CsvLogger_Init();
+  if (st != DRV_OK) {
+    Debug_Log_Level(DBG_ERR, "CsvLogger init err=%d", (int)st);
+  }
+
+  for (;;) {
+    st = CsvLogger_Flush();
+    if (st != DRV_OK) {
+      Debug_Log_Level(DBG_WARN, "CsvLogger flush err=%d", (int)st);
+    }
+
+    uint32_t overflow = CsvLogger_OverflowCount();
+    if (overflow > 0U) {
+      static uint32_t last_overflow = 0U;
+      if (overflow != last_overflow) {
+        last_overflow = overflow;
+        Debug_Log_Level(DBG_WARN, "CsvLogger overflow=%lu", (unsigned long)overflow);
+      }
+    }
+
+    osDelay(SD_LOG_TASK_PERIOD_MS);
   }
 }
